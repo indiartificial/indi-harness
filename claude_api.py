@@ -25,6 +25,13 @@ Fixes over the previous version:
   * **History search is scoped.** An untrusted sender's search can only
     ever match their own messages.
 
+  * **The cost ledger is readable.** Every run writes priced rows to the
+    Costs tab; `read_cost_ledger` lets Indi read them back and answer
+    "what have you been costing?" from the ledger rather than from
+    guesswork. Trusted senders only, aggregates by default, and the
+    `note` column — which carries correspondents' addresses — is included
+    only for senders who already have cross-sender history scope.
+
   * **Empty replies are caught.** If the tool loop runs out of iterations
     while Claude is still calling a tool, the final response can contain
     no text at all — the old code would have drafted a blank email.
@@ -36,6 +43,7 @@ Fixes over the previous version:
 from __future__ import annotations
 
 import base64
+import datetime
 import io
 import logging
 import os
@@ -48,6 +56,12 @@ log = logging.getLogger("indi.claude")
 
 HISTORY_SEARCH_TOOL_NAME = "search_message_history"
 SET_ASIDE_TOOL_NAME = "set_aside_without_replying"
+COST_LEDGER_TOOL_NAME = "read_cost_ledger"
+
+# A ledger query can't be allowed to ask for an unbounded window of a
+# sheet that grows forever; three months is well past anything useful.
+MAX_LEDGER_HOURS = 24 * 90
+DEFAULT_LEDGER_HOURS = 24
 
 SET_ASIDE_SCHEMA = {
     "name": SET_ASIDE_TOOL_NAME,
@@ -99,7 +113,7 @@ def history_search_schema(scoped_to_sender: bool) -> dict:
             "Search past emails Indi has processed (subject/body text and/or "
             "sender address) and the replies that were sent. Use this when the "
             "current email refers to an earlier exchange that isn't already in "
-            "the background memory you were given. Matching is a simple "
+            "the background memory you were given. Matching is a "
             "case-insensitive substring search over subject and body; it does "
             "not support boolean operators or date ranges." + scope_note
         ),
@@ -113,6 +127,39 @@ def history_search_schema(scoped_to_sender: bool) -> dict:
                 "sender": {
                     "type": "string",
                     "description": "Substring match on the sender address or name.",
+                },
+            },
+        },
+    }
+
+
+def cost_ledger_schema(include_notes: bool) -> dict:
+    detail_note = (
+        " Breakdown by correspondent is available."
+        if include_notes else
+        " Totals only — the per-call notes, which name other correspondents, "
+        "are not included."
+    )
+    return {
+        "name": COST_LEDGER_TOOL_NAME,
+        "description": (
+            "Read Indi's own Anthropic API spend ledger: one row per Claude "
+            "call, written at the end of every run. Returns dollars and call "
+            "counts over a window, broken down by model and by kind of call "
+            "(reply, heartbeat, memory). The figures are estimates computed "
+            "from token counts against a hardcoded rate card — they are not "
+            "the invoice, and an unpriced model contributes calls but no "
+            "dollars." + detail_note
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "hours": {
+                    "type": "integer",
+                    "description": (
+                        f"How far back to look, in hours. Defaults to "
+                        f"{DEFAULT_LEDGER_HOURS}; capped at {MAX_LEDGER_HOURS}."
+                    ),
                 },
             },
         },
@@ -282,6 +329,12 @@ def build_tools(cfg, trusted: bool, have_store: bool,
     if cfg.enable_history_search and have_store:
         tools.append(history_search_schema(scoped_to_sender=not scope_all_history))
 
+    # The spend ledger. Read-only, and restricted to trusted senders: what
+    # the account costs is Steve's business, not a stranger's, and the
+    # rows' notes name other correspondents.
+    if have_store and trusted:
+        tools.append(cost_ledger_schema(include_notes=scope_all_history))
+
     # Local filesystem / local execution. The runner decides what it
     # offers; by the time we get here the permission check has already
     # happened in check_and_reply.py.
@@ -318,6 +371,128 @@ def _run_history_search(store, cfg, tool_input: dict, restrict_to: str) -> str:
     return (
         f"{UNTRUSTED_OPEN}\n" + "\n\n---\n\n".join(blocks) + f"\n{UNTRUSTED_CLOSE}"
     )
+
+
+def _ledger_hours(tool_input: dict) -> int:
+    try:
+        hours = int(tool_input.get("hours") or DEFAULT_LEDGER_HOURS)
+    except (TypeError, ValueError):
+        hours = DEFAULT_LEDGER_HOURS
+    return max(1, min(hours, MAX_LEDGER_HOURS))
+
+
+def _parse_ledger_time(value: str):
+    try:
+        when = datetime.datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=datetime.timezone.utc)
+    return when
+
+
+def _run_cost_ledger(store, tool_input: dict, include_notes: bool) -> str:
+    """Summarise the Costs tab over a window.
+
+    Deliberately an aggregate rather than a row dump: the useful question
+    is "what is this costing and where does it go", and pasting hundreds
+    of rows into the context to answer it would itself be an expense.
+    """
+    hours = _ledger_hours(tool_input)
+    try:
+        rows = store.cost_rows()
+    except Exception as exc:
+        log.warning("Could not read the cost ledger: %s", exc)
+        return f"Could not read the cost ledger: {exc}"
+
+    cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=hours)
+    total = 0.0
+    calls = 0
+    unpriced = 0
+    undated = 0
+    tokens = {f: 0 for f in costs.TOKEN_FIELDS}
+    by_model: dict[str, list] = {}
+    by_kind: dict[str, list] = {}
+    by_note: dict[str, list] = {}
+    earliest = None
+
+    column_for = {
+        "input": "input_tokens", "output": "output_tokens",
+        "cache_read": "cache_read_tokens", "cache_write": "cache_write_tokens",
+    }
+
+    for row in rows:
+        when = _parse_ledger_time(row.get("at", ""))
+        if when is None:
+            undated += 1
+            continue
+        if when < cutoff:
+            continue
+        if earliest is None or when < earliest:
+            earliest = when
+
+        raw_usd = (row.get("usd") or "").strip() if isinstance(row.get("usd"), str) \
+            else row.get("usd")
+        try:
+            usd = float(raw_usd) if raw_usd not in ("", None) else None
+        except (TypeError, ValueError):
+            usd = None
+        if usd is None:
+            unpriced += 1
+            usd = 0.0
+
+        calls += 1
+        total += usd
+        for field, column in column_for.items():
+            try:
+                tokens[field] += int(row.get(column) or 0)
+            except (TypeError, ValueError):
+                pass
+
+        for bucket, key in (
+            (by_model, row.get("model") or "(unrecorded)"),
+            (by_kind, row.get("kind") or "(unrecorded)"),
+        ):
+            entry = bucket.setdefault(key, [0.0, 0])
+            entry[0] += usd
+            entry[1] += 1
+        if include_notes:
+            note = (row.get("note") or "(no note)").strip() or "(no note)"
+            entry = by_note.setdefault(note, [0.0, 0])
+            entry[0] += usd
+            entry[1] += 1
+
+    if not calls:
+        return (
+            f"The cost ledger has no rows in the last {hours}h "
+            f"({len(rows)} row(s) on file in total)."
+        )
+
+    def breakdown(bucket: dict, limit: int = 10) -> str:
+        items = sorted(bucket.items(), key=lambda kv: kv[1][0], reverse=True)[:limit]
+        return "; ".join(f"{name} ${spend:.4f} ({n})" for name, (spend, n) in items)
+
+    lines = [
+        f"Cost ledger, last {hours}h. Estimates from token counts against a "
+        "hardcoded rate card — not an invoice.",
+        f"Total: ${total:.4f} over {calls} call(s).",
+        f"Oldest row in window: {earliest.isoformat() if earliest else 'n/a'}.",
+        f"Tokens: {tokens['input']} in, {tokens['output']} out, "
+        f"{tokens['cache_read']} cache read, {tokens['cache_write']} cache write.",
+        f"By model: {breakdown(by_model)}",
+        f"By kind: {breakdown(by_kind)}",
+    ]
+    if include_notes and by_note:
+        lines.append(f"By note (correspondent, where recorded): {breakdown(by_note)}")
+    if unpriced:
+        lines.append(
+            f"{unpriced} call(s) in this window had no price on file, so they "
+            "add calls but no dollars — the real total is higher."
+        )
+    if undated:
+        lines.append(f"{undated} ledger row(s) had an unreadable timestamp and "
+                     "were skipped.")
+    return f"{UNTRUSTED_OPEN}\n" + "\n".join(lines) + f"\n{UNTRUSTED_CLOSE}"
 
 
 def generate_reply(client, cfg, system_prompt: str, msg: dict,
@@ -377,7 +552,7 @@ def generate_reply(client, cfg, system_prompt: str, msg: dict,
     create = client.beta.messages.create if betas else client.messages.create
 
     stats = {"server_tools": 0, "history_searches": 0, "local_tools": 0,
-             "self_code": 0, "set_aside": None,
+             "self_code": 0, "cost_ledger": 0, "set_aside": None,
              "cache_read": 0, "cache_created": 0, "iterations": 0,
              # Every billable token this message consumes, summed across
              # the tool loop. Priced by the caller, which knows the model.
@@ -404,9 +579,10 @@ def generate_reply(client, cfg, system_prompt: str, msg: dict,
         )
 
         # Client tools are the ones this script executes itself: the
-        # history search and, when enabled, the local file/exec tools.
-        # web_search / web_fetch / code_execution are server tools and are
-        # resolved inside a single API call, so they never appear here.
+        # history search, the cost ledger and, when enabled, the local
+        # file/exec tools. web_search / web_fetch / code_execution are
+        # server tools and are resolved inside a single API call, so they
+        # never appear here.
         client_calls = [
             b for b in response.content if getattr(b, "type", "") == "tool_use"
         ]
@@ -428,6 +604,14 @@ def generate_reply(client, cfg, system_prompt: str, msg: dict,
                 text, is_error = _run_history_search(
                     store, cfg, call.input, restrict_to
                 ), False
+            elif call.name == COST_LEDGER_TOOL_NAME:
+                if store is None or not trusted:
+                    text, is_error = "The cost ledger is not available.", True
+                else:
+                    stats["cost_ledger"] += 1
+                    text, is_error = _run_cost_ledger(
+                        store, call.input, include_notes=scope_all_history
+                    ), False
             elif self_code_runner is not None and call.name in self_code_runner.tool_names:
                 stats["self_code"] += 1
                 text, is_error = self_code_runner.handle(call.name, call.input)

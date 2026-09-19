@@ -232,13 +232,17 @@ def run_heartbeat(client, cfg, gmail, store, system_prompt: str,
     if model != cfg.model:
         log.info("Heartbeat running on %s (reply model is %s).", model, cfg.model)
 
-    response = client.messages.create(
+    # Streamed for the same reason as the reply path: a non-streaming
+    # request is rejected outright once max_tokens implies more than ten
+    # minutes of generation.
+    with client.messages.stream(
         model=model,
         max_tokens=cfg.max_tokens,
         system=system_prompt + HEARTBEAT_SYSTEM_SUFFIX,
         tools=tools,
         messages=[{"role": "user", "content": _context(cfg, store) + budget_note}],
-    )
+    ) as streamed:
+        response = streamed.get_final_message()
 
     # Price against the model that actually ran, not the reply model —
     # otherwise the saving this change exists for wouldn't show up in the

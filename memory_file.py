@@ -228,14 +228,15 @@ def consolidate(client, cfg, drive_service, store, sender_addr: str) -> bool:
     )
 
     try:
-        response = client.messages.create(
+        with client.messages.stream(
             model=cfg.model,
             # Was hardcoded at 1024, which truncated the file and then
             # overwrote the original with the truncated text.
             max_tokens=cfg.memory_max_tokens,
             system=CONSOLIDATION_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_content}],
-        )
+        ) as streamed:
+            response = streamed.get_final_message()
     except Exception as exc:
         log.error("Memory consolidation call failed for %s: %s", sender_addr, exc)
         return False

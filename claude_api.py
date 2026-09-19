@@ -549,7 +549,11 @@ def generate_reply(client, cfg, system_prompt: str, msg: dict,
     if betas:
         kwargs["betas"] = betas
 
-    create = client.beta.messages.create if betas else client.messages.create
+    # Streaming, not create(): the SDK refuses a non-streaming request
+    # whose max_tokens implies more than ten minutes of generation
+    # (it estimates 3600 * max_tokens / 128000 seconds), which caps
+    # non-streaming at ~21333. Streaming removes that ceiling.
+    stream = client.beta.messages.stream if betas else client.messages.stream
 
     stats = {"server_tools": 0, "history_searches": 0, "local_tools": 0,
              "self_code": 0, "cost_ledger": 0, "set_aside": None,
@@ -565,7 +569,8 @@ def generate_reply(client, cfg, system_prompt: str, msg: dict,
     for _ in range(max(1, cfg.max_tool_loop_iterations)):
         stats["iterations"] += 1
         kwargs["messages"] = messages
-        response = create(**kwargs)
+        with stream(**kwargs) as streamed:
+            response = streamed.get_final_message()
 
         usage = getattr(response, "usage", None)
         if usage is not None:

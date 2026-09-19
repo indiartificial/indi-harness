@@ -1,0 +1,9 @@
+.env
+token.json
+credentials.json
+indi.lock
+log.txt
+__pycache__/
+*.pyc
+
+api_key.txt

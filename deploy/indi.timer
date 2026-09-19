@@ -1,0 +1,12 @@
+[Unit]
+Description=Check Indi's mail, 5 minutes after the last run finished
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=5min
+# Spread the load a little so every restart doesn't fire at :00.
+RandomizedDelaySec=30
+Persistent=true
+
+[Install]
+WantedBy=timers.target

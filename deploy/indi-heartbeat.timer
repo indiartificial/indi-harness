@@ -1,0 +1,14 @@
+[Unit]
+Description=Give Indi a chance to act on its own initiative
+
+[Timer]
+OnBootSec=15min
+# Hourly is a reasonable starting cadence. The daily budgets in .env are
+# what actually bound how much Indi does; this only sets how often it gets
+# the chance to consider.
+OnUnitActiveSec=1h
+RandomizedDelaySec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

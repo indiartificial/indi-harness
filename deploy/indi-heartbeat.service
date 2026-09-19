@@ -1,0 +1,21 @@
+[Unit]
+Description=Indi Artificial — initiative cycle
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=indi
+Group=indi
+WorkingDirectory=/home/indi/harness
+ExecStart=/home/indi/venv/bin/python /home/indi/harness/check_and_reply.py --heartbeat --non-interactive
+TimeoutStartSec=600
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/indi/harness /home/indi/workspace /home/indi/workspace-out
+
+[Install]
+WantedBy=multi-user.target

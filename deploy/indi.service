@@ -1,0 +1,27 @@
+[Unit]
+Description=Indi Artificial — check mail and reply
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=indi
+Group=indi
+WorkingDirectory=/home/indi/harness
+ExecStart=/home/indi/venv/bin/python /home/indi/harness/check_and_reply.py --non-interactive
+TimeoutStartSec=900
+
+# The harness needs its own directory and the docker socket; nothing else.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/indi/harness /home/indi/workspace /home/indi/workspace-out
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

@@ -43,17 +43,36 @@ correspondence, which is not something anyone should rely on for, say, a
 medication dose.
 
 So reminders are stored as rows in a "Reminders" tab and delivered by
-`deliver_due_reminders`, which runs at the top of every heartbeat
-*before* the model is consulted. Delivery is ordinary code: if a row is
-due, it goes out. No model decides anything at delivery time.
+`deliver_due_reminders`. Delivery is ordinary code: if a row is due, it
+goes out. No model decides anything at delivery time.
+
+There are two ways a row gets written, and two places it gets read:
+
+  * WRITTEN from a reply, via `handle_reply_reminder` — the tool
+    `schedule_reminder` offered to the reply path in claude_api.py. This
+    is the case that actually matters: someone writes "remind me on
+    Wednesday" and the reminder is booked in the same run that answers
+    them, rather than hoping a later heartbeat notices. A reminder
+    scheduled this way can only ever be addressed to the person being
+    replied to, so nothing a sender writes can aim mail at a third party.
+  * WRITTEN from a heartbeat, via the same tool in `schemas` below, for
+    the rarer case where Indi works out on its own initiative that
+    something needs to go out later.
+  * READ at the top of every heartbeat *and* at the top of every mail
+    check, before anything else happens. Mail runs every few minutes and
+    heartbeats hourly, so a due reminder goes out within minutes, not
+    within an hour — and it still goes out on a day when no heartbeat
+    manages to run.
 
 The bounds that make this safe to leave running:
 
   * Only an existing correspondent can be a recipient, same policy as
     self-initiated mail.
   * A reminder must be dated in the future and within ~400 days.
-  * At most MAX_PENDING_REMINDERS outstanding, and at most
-    MAX_REMINDERS_PER_RUN delivered per heartbeat.
+  * At most MAX_PENDING_REMINDERS outstanding and MAX_PENDING_PER_RECIPIENT
+    for any one person, so a sender who asks for fifty reminders — or an
+    email engineered to make Indi ask for fifty — fills their own small
+    quota and nobody else's. At most MAX_REMINDERS_PER_RUN go out per run.
   * If a reminder is more than REMINDER_GRACE_HOURS late — the machine was
     off, Gmail was down — it expires unsent rather than arriving at three
     in the morning two days later, which is worse than useless for
@@ -102,6 +121,10 @@ REMINDER_GRACE_HOURS = 24
 # mailbox full of reminders.
 MAX_REMINDERS_PER_RUN = 5
 MAX_PENDING_REMINDERS = 50
+# Per person, so one correspondent can't take the whole queue. The reply
+# path lets anyone Indi answers schedule their own reminders, and this is
+# what keeps that from being worth abusing.
+MAX_PENDING_PER_RECIPIENT = 10
 MAX_DAYS_AHEAD = 400
 
 # The heartbeat's default model. Haiku, because a heartbeat is one short
@@ -185,9 +208,9 @@ def schemas(cfg, recipients: list[str], allow_new: bool) -> list[dict]:
                 "Schedule an email to go out at a specific future time. Use this "
                 "only when someone has actually asked to be reminded of "
                 "something; it is not a way to schedule your own thoughts. The "
-                "message is delivered by ordinary code at the first heartbeat on "
-                "or after the due time, so expect it to land within about an "
-                "hour of when you asked for. If it cannot be delivered within "
+                "message is delivered by ordinary code on the first run on or "
+                "after the due time, so expect it to land within a few minutes "
+                "of the time you ask for. If it cannot be delivered within "
                 f"{REMINDER_GRACE_HOURS} hours of the due time it is dropped "
                 "rather than sent late. Same recipient rule as sending: "
                 + recipient_note
@@ -435,6 +458,11 @@ def _schedule(cfg, store, payload: dict, recipients: list[str],
     existing = pending_reminders(store)
     if len(existing) >= MAX_PENDING_REMINDERS:
         return f"refused: {len(existing)} reminders already pending"
+    mine = sum(1 for row in existing
+               if (row.get("recipient") or "").strip().lower() == to_addr)
+    if mine >= MAX_PENDING_PER_RECIPIENT:
+        return (f"refused: {to_addr} already has {mine} reminders pending, "
+                f"which is the per-person limit")
     for row in existing:
         if ((row.get("recipient") or "").strip().lower() == to_addr
                 and (row.get("due_at") or "").strip() == due.isoformat()):
@@ -456,6 +484,96 @@ def _schedule(cfg, store, payload: dict, recipients: list[str],
     })
     log.info("Reminder scheduled for %s at %s.", to_addr, due.isoformat())
     return f"reminder scheduled for {to_addr} at {due.isoformat()}"
+
+
+# ---------------------------------------------------------------------------
+# THE REPLY PATH
+# ---------------------------------------------------------------------------
+#
+# Scheduling from a heartbeat was never the useful case. People ask to be
+# reminded of something in the message they are already writing, and the
+# reply is where that request should be honoured — while Indi is looking
+# at the sentence that made it, with the sender's timezone in front of it,
+# and where it can say in the same breath that the reminder is booked.
+
+def reply_reminder_schema(sender: str, now: datetime.datetime | None = None) -> dict:
+    """The `schedule_reminder` tool as offered while replying to `sender`.
+
+    Deliberately narrower than the heartbeat's version: there is no `to`
+    field. The recipient is the person being replied to, fixed here in
+    code, because the email that asks for the reminder is untrusted text
+    and "remind bob@example.com every minute" must not be a thing it can
+    arrange.
+    """
+    stamp = (now or _now()).isoformat()
+    return {
+        "name": REMINDER_TOOL,
+        "description": (
+            f"Schedule an email to {sender} — the person you are replying to — "
+            "to go out at a specific future time. This is how you honour a "
+            "request like 'remind me on Wednesday morning': call this, then say "
+            "in your reply that it is scheduled. Do not promise a reminder you "
+            "have not scheduled with this tool, and do not call it for anything "
+            "the sender did not actually ask to be reminded about. Delivery is "
+            "done by ordinary code on the first run after the due time, so it "
+            "lands within a few minutes of the time you give; it does not "
+            "depend on anything you do later. It cannot be cancelled or edited "
+            "once scheduled, and if it cannot be delivered within "
+            f"{REMINDER_GRACE_HOURS} hours of the due time it is dropped rather "
+            "than sent uselessly late. The tool result tells you whether it was "
+            "actually scheduled — if it was refused, say so plainly rather than "
+            "implying the reminder exists."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "due_at": {
+                    "type": "string",
+                    "description": (
+                        "ISO 8601 with an explicit UTC offset, e.g. "
+                        f"2026-09-23T13:00:00+00:00. The current time is {stamp}, "
+                        "and the due time must be after it. Work out the offset "
+                        "from the sender's own timezone if they gave one — a "
+                        "bare local time with no offset is read as UTC and will "
+                        "arrive at the wrong hour. Mind daylight saving: in "
+                        "summer, US Eastern is -04:00, not -05:00."
+                    ),
+                },
+                "subject": {"type": "string",
+                            "description": "Subject line of the reminder email."},
+                "body": {"type": "string",
+                         "description": (
+                             "Plain text, no markdown. Write the whole message "
+                             "as it should read on the day; nothing is added "
+                             "later, and you won't see it again before it goes."
+                         )},
+            },
+            "required": ["due_at", "subject", "body"],
+        },
+    }
+
+
+def handle_reply_reminder(cfg, store, sender: str, payload: dict) -> tuple[str, bool]:
+    """Run the reply path's `schedule_reminder`. Returns (text, is_error).
+
+    The recipient is forced to `sender`, which also settles the recipient
+    policy: someone who has just written to Indi is by definition a
+    correspondent, whatever the Outbound tab happens to know.
+    """
+    sender = (sender or "").strip().lower()
+    if store is None:
+        return "Reminders are unavailable: no spreadsheet store on this run.", True
+    if not sender or "@" not in sender:
+        return f"Reminders are unavailable: no usable sender address ({sender!r}).", True
+
+    booked = dict(payload or {})
+    booked["to"] = sender
+    try:
+        outcome = _schedule(cfg, store, booked, [sender], set())
+    except Exception as exc:
+        log.error("Scheduling a reminder for %s failed", sender, exc_info=True)
+        return f"The reminder could not be scheduled: {exc}", True
+    return outcome, outcome.startswith("refused:")
 
 
 # ---------------------------------------------------------------------------

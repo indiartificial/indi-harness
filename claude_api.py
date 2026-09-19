@@ -50,6 +50,7 @@ import os
 import re
 
 import costs
+import outbound
 import sheets_queue
 
 log = logging.getLogger("indi.claude")
@@ -295,7 +296,8 @@ def build_attachment_blocks(gmail, cfg, msg: dict, client, trusted: bool):
 
 def build_tools(cfg, trusted: bool, have_store: bool,
                 local_runner=None, scope_all_history: bool = False,
-                self_code_runner=None) -> tuple[list[dict], list[str]]:
+                self_code_runner=None,
+                reminder_sender: str = "") -> tuple[list[dict], list[str]]:
     """Returns (tools, betas). Trust gates the dangerous ones."""
     tools: list[dict] = []
     want_fetch = False
@@ -328,6 +330,14 @@ def build_tools(cfg, trusted: bool, have_store: bool,
 
     if cfg.enable_history_search and have_store:
         tools.append(history_search_schema(scoped_to_sender=not scope_all_history))
+
+    # Reminders. Offered to everyone Indi replies to, not just trusted
+    # senders: the only address it can ever schedule mail to is the
+    # sender's own, and the per-person cap in outbound.py bounds it. The
+    # alternative — telling someone their reminder is impossible because
+    # they aren't on a list — is worse than the abuse it would prevent.
+    if have_store and reminder_sender and getattr(cfg, "enable_outbound", False):
+        tools.append(outbound.reply_reminder_schema(reminder_sender))
 
     # The spend ledger. Read-only, and restricted to trusted senders: what
     # the account costs is Steve's business, not a stranger's, and the
@@ -504,7 +514,8 @@ def generate_reply(client, cfg, system_prompt: str, msg: dict,
     """Returns (reply_text, stats). stats["set_aside"] is set to the stated
     reason if Indi chose not to reply at all."""
     tools, betas = build_tools(cfg, trusted, store is not None, local_runner,
-                               scope_all_history, self_code_runner)
+                               scope_all_history, self_code_runner,
+                               reminder_sender=msg["from_addr"])
 
     system_blocks = [{
         "type": "text",
@@ -556,7 +567,7 @@ def generate_reply(client, cfg, system_prompt: str, msg: dict,
     stream = client.beta.messages.stream if betas else client.messages.stream
 
     stats = {"server_tools": 0, "history_searches": 0, "local_tools": 0,
-             "self_code": 0, "cost_ledger": 0, "set_aside": None,
+             "self_code": 0, "cost_ledger": 0, "reminders": 0, "set_aside": None,
              "cache_read": 0, "cache_created": 0, "iterations": 0,
              # Every billable token this message consumes, summed across
              # the tool loop. Priced by the caller, which knows the model.
@@ -617,6 +628,16 @@ def generate_reply(client, cfg, system_prompt: str, msg: dict,
                     text, is_error = _run_cost_ledger(
                         store, call.input, include_notes=scope_all_history
                     ), False
+            elif call.name == outbound.REMINDER_TOOL:
+                # Not wrapped in the untrusted markers: the result is this
+                # script's own sentence about what it did, not content
+                # from anywhere else, and Claude has to be able to believe
+                # it to report honestly on whether the reminder exists.
+                text, is_error = outbound.handle_reply_reminder(
+                    cfg, store, msg["from_addr"], call.input
+                )
+                if not is_error:
+                    stats["reminders"] += 1
             elif self_code_runner is not None and call.name in self_code_runner.tool_names:
                 stats["self_code"] += 1
                 text, is_error = self_code_runner.handle(call.name, call.input)

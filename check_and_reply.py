@@ -182,15 +182,41 @@ def load_system_prompt(cfg: Config, self_address: str) -> str:
         "it goes anywhere."
     )
 
+    # What Indi can and cannot do about time. This used to say flatly that
+    # there was no scheduler and that no follow-up could ever be promised,
+    # which was true when it was written and has been false since outbound
+    # initiative and reminders landed. A system prompt that understates the
+    # tools is not a safe default: it made Indi tell someone asking for a
+    # medication reminder that the capability didn't exist, while the tool
+    # to schedule exactly that was sitting in its own request.
+    if cfg.enable_outbound:
+        initiative = (
+            "You have two ways to act outside a reply. A periodic heartbeat run "
+            "lets you start a message on your own initiative, within a small "
+            "daily budget. And the schedule_reminder tool, when it is offered, "
+            "books an email to the person you are replying to for a future time "
+            "you specify; it is delivered by ordinary code, not by any later "
+            "decision of yours, so a reminder you schedule really will arrive.\n"
+            "That is the whole of it. Promise a follow-up only when you have "
+            "just scheduled it with the tool and the tool said it worked. "
+            "Never promise to check back on something, watch for something, or "
+            "send something separately — outside a scheduled reminder you have "
+            "no way to do any of that."
+        )
+    else:
+        initiative = (
+            "You cannot send mail on your own initiative and you have no "
+            "scheduler. You can only reply to a message that arrives. Never "
+            "promise to follow up later, check back, or send something "
+            "separately — you have no way to do any of that."
+        )
+
     runtime = (
         "\n\n--- RUNTIME CONTEXT (added automatically each run) ---\n"
         f"Today's date and time: {today.strftime('%A, %B %d, %Y at %H:%M %Z')}.\n"
         f"Your email address: {self_address}\n"
         f"{mode}\n"
-        "You cannot send mail on your own initiative and you have no scheduler. "
-        "You can only reply to a message that arrives. Never promise to follow "
-        "up later, check back, or send something separately — you have no way "
-        "to do any of that.\n"
+        f"{initiative}\n"
         "Keep replies to a few short paragraphs unless the sender clearly wants "
         "more."
     )
@@ -366,6 +392,8 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
     if stats.get("local_tools"):
         log.warning("Claude made %d local tool call(s) on this machine.",
                     stats["local_tools"])
+    if stats.get("reminders"):
+        log.info("Scheduled %d reminder(s) for %s.", stats["reminders"], sender)
     if stats["cache_read"] or stats["cache_created"]:
         log.info("Prompt cache: %d read, %d written.",
                  stats["cache_read"], stats["cache_created"])
@@ -551,6 +579,19 @@ def main() -> int:
             )
             log.info("Heartbeat: %s", outcome)
             return 0
+
+        # Due reminders go out on every mail check, not only on the hourly
+        # heartbeat. Mail runs every few minutes, so this is the difference
+        # between "9am" meaning 9am and it meaning some time before 10 —
+        # and it means a reminder still arrives on a day when the heartbeat
+        # timer is off or its model call fails. Delivery is idempotent: a
+        # row is marked sent the moment it goes.
+        if cfg.enable_outbound:
+            try:
+                for outcome in outbound.deliver_due_reminders(cfg, gmail, store):
+                    log.info("Reminder: %s", outcome)
+            except Exception:
+                log.error("Reminder delivery failed", exc_info=True)
 
         if args.message_id:
             ids = [{"id": args.message_id}]

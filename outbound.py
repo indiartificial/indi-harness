@@ -32,10 +32,44 @@ Heartbeats run on their own model — see `heartbeat_model` below. The
 reply path is the one where quality is visible to another person; the
 heartbeat is a small, bounded decision that fires around the clock, so
 it runs on the cheapest capable model by default.
+
+REMINDERS
+---------
+A third thing lives here: scheduled reminders. Someone asks for a message
+at a particular time, and until now the honest answer was that there was
+no mechanism for it — the heartbeat could write to people, but only as a
+judgement call made afresh each hour by a small model reading recent
+correspondence, which is not something anyone should rely on for, say, a
+medication dose.
+
+So reminders are stored as rows in a "Reminders" tab and delivered by
+`deliver_due_reminders`, which runs at the top of every heartbeat
+*before* the model is consulted. Delivery is ordinary code: if a row is
+due, it goes out. No model decides anything at delivery time.
+
+The bounds that make this safe to leave running:
+
+  * Only an existing correspondent can be a recipient, same policy as
+    self-initiated mail.
+  * A reminder must be dated in the future and within ~400 days.
+  * At most MAX_PENDING_REMINDERS outstanding, and at most
+    MAX_REMINDERS_PER_RUN delivered per heartbeat.
+  * If a reminder is more than REMINDER_GRACE_HOURS late — the machine was
+    off, Gmail was down — it expires unsent rather than arriving at three
+    in the morning two days later, which is worse than useless for
+    anything time-bound.
+
+Reminders don't consume the outbound daily budget. That budget exists to
+stop Indi from deciding on its own to write to people; a reminder was
+asked for.
+
+Storage deliberately reuses SheetStore's generic tab primitives rather
+than adding schema to sheets_queue.py, so this feature is one file.
 """
 
 from __future__ import annotations
 
+import datetime
 import logging
 import os
 
@@ -47,7 +81,28 @@ log = logging.getLogger("indi.outbound")
 
 SEND_TOOL = "send_new_message"
 JOURNAL_TOOL = "write_journal_entry"
+REMINDER_TOOL = "schedule_reminder"
 NOTHING_TOOL = "do_nothing"
+
+# -- reminders ---------------------------------------------------------
+
+REMINDERS_TAB = "Reminders"
+REMINDERS_HEADERS = [
+    "due_at", "recipient", "subject", "body", "status", "created_at", "sent_at",
+]
+
+STATUS_SCHEDULED = "scheduled"
+STATUS_SENT = "sent"
+STATUS_EXPIRED = "expired"
+STATUS_FAILED = "failed"
+
+# How late a reminder may be and still be worth sending.
+REMINDER_GRACE_HOURS = 24
+# Ceilings. Both exist so a bug or a confused heartbeat can't turn into a
+# mailbox full of reminders.
+MAX_REMINDERS_PER_RUN = 5
+MAX_PENDING_REMINDERS = 50
+MAX_DAYS_AHEAD = 400
 
 # The heartbeat's default model. Haiku, because a heartbeat is one short
 # decision made on a timer: most of them end in do_nothing, and paying
@@ -125,6 +180,41 @@ def schemas(cfg, recipients: list[str], allow_new: bool) -> list[dict]:
             },
         },
         {
+            "name": REMINDER_TOOL,
+            "description": (
+                "Schedule an email to go out at a specific future time. Use this "
+                "only when someone has actually asked to be reminded of "
+                "something; it is not a way to schedule your own thoughts. The "
+                "message is delivered by ordinary code at the first heartbeat on "
+                "or after the due time, so expect it to land within about an "
+                "hour of when you asked for. If it cannot be delivered within "
+                f"{REMINDER_GRACE_HOURS} hours of the due time it is dropped "
+                "rather than sent late. Same recipient rule as sending: "
+                + recipient_note
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "to": {"type": "string"},
+                    "due_at": {
+                        "type": "string",
+                        "description": (
+                            "ISO 8601 with an explicit UTC offset, e.g. "
+                            "2026-09-23T13:00:00+00:00. Must be in the future. "
+                            "If you are working from someone's local time, "
+                            "convert it — a bare local time with no offset is "
+                            "read as UTC and will be wrong."
+                        ),
+                    },
+                    "subject": {"type": "string"},
+                    "body": {"type": "string",
+                             "description": "Plain text, no markdown. Write the "
+                                            "whole message; nothing is added later."},
+                },
+                "required": ["to", "due_at", "subject", "body"],
+            },
+        },
+        {
             "name": JOURNAL_TOOL,
             "description": (
                 "Write a note to yourself. You will see recent entries on later "
@@ -170,8 +260,207 @@ or filling the silence.
 The journal is different — it costs nobody anything, and a note you'll read
 on a later run is often the right move when a message isn't.
 
+Reminders that were already due have been delivered before this prompt was
+written; you don't need to send them by hand, and you should not schedule a
+reminder that duplicates one already listed below as pending.
+
 Call exactly one tool. If nothing needs doing, call do_nothing."""
 
+
+# ---------------------------------------------------------------------------
+# REMINDER STORAGE
+# ---------------------------------------------------------------------------
+
+def _now() -> datetime.datetime:
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
+def parse_when(value: str) -> datetime.datetime | None:
+    """ISO 8601 -> aware UTC datetime, or None if it isn't usable."""
+    text = (value or "").strip()
+    if not text:
+        return None
+    if text.endswith(("Z", "z")):
+        text = text[:-1] + "+00:00"
+    try:
+        when = datetime.datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=datetime.timezone.utc)
+    return when.astimezone(datetime.timezone.utc)
+
+
+def _reminder_rows(store) -> list[dict]:
+    try:
+        store._ensure_tab(store.responses_id, REMINDERS_TAB, REMINDERS_HEADERS)
+        return store._load(store.responses_id, REMINDERS_TAB)
+    except Exception:
+        log.warning("Could not read the Reminders tab", exc_info=True)
+        return []
+
+
+def pending_reminders(store) -> list[dict]:
+    rows = [r for r in _reminder_rows(store)
+            if (r.get("status") or "").strip().lower() == STATUS_SCHEDULED]
+    rows.sort(key=lambda r: r.get("due_at", ""))
+    return rows
+
+
+def _append_reminder(store, record: dict) -> int:
+    store._ensure_tab(store.responses_id, REMINDERS_TAB, REMINDERS_HEADERS)
+    return store._append(store.responses_id, REMINDERS_TAB, REMINDERS_HEADERS, record)
+
+
+def _set_reminder_status(store, row: dict, status: str, sent_at: str = "") -> None:
+    """Writes the status/created_at/sent_at block for one row in place."""
+    row_number = row.get("_row", -1)
+    row["status"] = status
+    row["sent_at"] = sent_at
+    if row_number <= 0:
+        log.warning("No row number for reminder due %s; status not recorded",
+                    row.get("due_at"))
+        return
+    first = sheets_queue._col_letter(REMINDERS_HEADERS.index("status"))
+    last = sheets_queue._col_letter(REMINDERS_HEADERS.index("sent_at"))
+    try:
+        store.sheets.spreadsheets().values().update(
+            spreadsheetId=store.responses_id,
+            range=f"{REMINDERS_TAB}!{first}{row_number}:{last}{row_number}",
+            valueInputOption="RAW",
+            body={"values": [[status, row.get("created_at", ""), sent_at]]},
+        ).execute()
+    except Exception:
+        log.error("Could not update reminder row %s to %s", row_number, status,
+                  exc_info=True)
+
+
+def _deliver_one(cfg, gmail, recipient: str, subject: str, body: str) -> str:
+    mime = gmail_io.build_reply_mime(
+        to_addr=recipient, subject=subject, body=body, in_reply_to="",
+    )
+    mime = _rebuild_subject(mime, subject)
+    if cfg.send_automatically:
+        gmail.users().messages().send(userId="me", body=mime).execute()
+        return "sent"
+    gmail.users().drafts().create(userId="me", body={"message": mime}).execute()
+    return "drafted"
+
+
+def deliver_due_reminders(cfg, gmail, store) -> list[str]:
+    """Send every reminder that has come due. Called at the top of each
+    heartbeat, before the model is asked anything — this is the part that
+    has to work whether or not a model is feeling helpful."""
+    now = _now()
+    delivered = 0
+    outcomes: list[str] = []
+
+    for row in pending_reminders(store):
+        due = parse_when(row.get("due_at", ""))
+        recipient = (row.get("recipient") or "").strip().lower()
+        body = (row.get("body") or "").strip()
+        subject = (row.get("subject") or "").strip() or "Reminder"
+
+        if due is None or "@" not in recipient or not body:
+            _set_reminder_status(store, row, STATUS_FAILED)
+            outcomes.append(f"malformed reminder row {row.get('_row')} marked failed")
+            continue
+
+        if due > now:
+            continue
+
+        late = now - due
+        if late > datetime.timedelta(hours=REMINDER_GRACE_HOURS):
+            _set_reminder_status(store, row, STATUS_EXPIRED)
+            outcomes.append(
+                f"reminder for {recipient} was {late.days}d"
+                f"{late.seconds // 3600}h late — expired, not sent"
+            )
+            continue
+
+        if delivered >= MAX_REMINDERS_PER_RUN:
+            outcomes.append("more reminders are due than one run will send; "
+                            "the rest wait for the next heartbeat")
+            break
+
+        if cfg.dry_run:
+            print(f"\n[dry-run] reminder due {row.get('due_at')}\nTO: {recipient}\n"
+                  f"SUBJECT: {subject}\n{'-'*60}\n{body}\n")
+            outcomes.append(f"dry run (reminder to {recipient} not sent)")
+            continue
+
+        try:
+            outcome = _deliver_one(cfg, gmail, recipient, subject, body)
+        except Exception as exc:
+            # Leave it scheduled: the next heartbeat retries, and the grace
+            # window stops that going on forever.
+            log.error("Reminder to %s failed to send: %s", recipient, exc)
+            outcomes.append(f"reminder to {recipient} failed ({exc}); will retry")
+            continue
+
+        _set_reminder_status(store, row, STATUS_SENT, _now().isoformat())
+        delivered += 1
+        log.info("Reminder %s to %s (due %s).", outcome, recipient, row.get("due_at"))
+        outcomes.append(f"reminder {outcome} to {recipient}")
+
+    return outcomes
+
+
+def _schedule(cfg, store, payload: dict, recipients: list[str],
+              self_addrs: set[str]) -> str:
+    to_addr = (payload.get("to") or "").strip().lower()
+    subject = (payload.get("subject") or "").strip() or "Reminder"
+    body = (payload.get("body") or "").strip()
+    due = parse_when(payload.get("due_at", ""))
+
+    if not to_addr or "@" not in to_addr:
+        return f"refused: not a usable address ({to_addr!r})"
+    if to_addr in self_addrs:
+        return "refused: that's your own address"
+    if not body:
+        return "refused: empty reminder body"
+    if due is None:
+        return f"refused: could not read {payload.get('due_at')!r} as a date and time"
+
+    now = _now()
+    if due <= now:
+        return f"refused: {due.isoformat()} is not in the future"
+    if due - now > datetime.timedelta(days=MAX_DAYS_AHEAD):
+        return f"refused: more than {MAX_DAYS_AHEAD} days ahead"
+
+    if not cfg.outbound_allow_new_recipients and to_addr not in recipients:
+        log.warning("Refused reminder for %s: not an existing correspondent.", to_addr)
+        return f"refused: {to_addr} is not someone you're already corresponding with"
+
+    existing = pending_reminders(store)
+    if len(existing) >= MAX_PENDING_REMINDERS:
+        return f"refused: {len(existing)} reminders already pending"
+    for row in existing:
+        if ((row.get("recipient") or "").strip().lower() == to_addr
+                and (row.get("due_at") or "").strip() == due.isoformat()):
+            return "refused: an identical reminder is already scheduled"
+
+    if cfg.dry_run:
+        print(f"\n[dry-run] reminder for {due.isoformat()}\nTO: {to_addr}\n"
+              f"SUBJECT: {subject}\n{'-'*60}\n{body}\n")
+        return "dry run (reminder not scheduled)"
+
+    _append_reminder(store, {
+        "due_at": due.isoformat(),
+        "recipient": to_addr,
+        "subject": subject[:500],
+        "body": body[: cfg.max_body_chars],
+        "status": STATUS_SCHEDULED,
+        "created_at": now.isoformat(),
+        "sent_at": "",
+    })
+    log.info("Reminder scheduled for %s at %s.", to_addr, due.isoformat())
+    return f"reminder scheduled for {to_addr} at {due.isoformat()}"
+
+
+# ---------------------------------------------------------------------------
+# HEARTBEAT
+# ---------------------------------------------------------------------------
 
 def _context(cfg, store) -> str:
     """What Indi knows going into a heartbeat."""
@@ -196,6 +485,13 @@ def _context(cfg, store) -> str:
             f"{r.get('subject','')}\n{(r.get('body','') or '')[:400]}" for r in sent
         ))
 
+    upcoming = pending_reminders(store)[:10]
+    if upcoming:
+        parts.append("=== REMINDERS STILL PENDING ===\n" + "\n".join(
+            f"[due {r.get('due_at','')}] to {r.get('recipient','')} — "
+            f"{r.get('subject','')}" for r in upcoming
+        ))
+
     if not parts:
         parts.append("(No correspondence yet. This is a quiet start.)")
     return "\n\n".join(parts)
@@ -204,11 +500,21 @@ def _context(cfg, store) -> str:
 def run_heartbeat(client, cfg, gmail, store, system_prompt: str,
                   self_addrs: set[str]) -> str:
     """One heartbeat. Returns a short outcome string."""
+    # Reminders first, and unconditionally: they were asked for, so they
+    # don't depend on the model being called at all, and they aren't
+    # governed by the initiative budgets below.
+    try:
+        reminder_outcomes = deliver_due_reminders(cfg, gmail, store)
+    except Exception:
+        log.error("Reminder delivery failed", exc_info=True)
+        reminder_outcomes = ["reminder delivery raised an error (see log)"]
+    prefix = ("; ".join(reminder_outcomes) + "; ") if reminder_outcomes else ""
+
     sent_today = store.outbound_today()
     journal_today = store.journal_today()
 
     if sent_today >= cfg.outbound_max_per_day and journal_today >= cfg.journal_max_per_day:
-        return "budgets exhausted for today; skipping"
+        return prefix + "budgets exhausted for today; skipping"
 
     recipients = sorted(store.known_correspondents() - self_addrs)
     tools = schemas(cfg, recipients, cfg.outbound_allow_new_recipients)
@@ -227,6 +533,11 @@ def run_heartbeat(client, cfg, gmail, store, system_prompt: str,
     except Exception:
         log.debug("Could not read the spend ledger for the budget note",
                   exc_info=True)
+
+    budget_note += (
+        f"\nCurrent time: {_now().isoformat()} (UTC). Use this when working out "
+        "a reminder's due time."
+    )
 
     model = heartbeat_model(cfg)
     if model != cfg.model:
@@ -254,33 +565,36 @@ def run_heartbeat(client, cfg, gmail, store, system_prompt: str,
     if not calls:
         text = "".join(b.text for b in response.content
                        if getattr(b, "type", "") == "text").strip()
-        return f"no action chosen ({text[:200] or 'no output'})"
+        return prefix + f"no action chosen ({text[:200] or 'no output'})"
 
     # Exactly one action per heartbeat, whatever the model asked for.
     call = calls[0]
 
     if call.name == NOTHING_TOOL:
         reason = (call.input.get("reason") or "").strip()
-        return f"nothing to do ({reason[:200] or 'no reason given'})"
+        return prefix + f"nothing to do ({reason[:200] or 'no reason given'})"
 
     if call.name == JOURNAL_TOOL:
         entry = (call.input.get("entry") or "").strip()
         if not entry:
-            return "empty journal entry; skipped"
+            return prefix + "empty journal entry; skipped"
         if journal_today >= cfg.journal_max_per_day:
-            return "journal budget exhausted for today"
+            return prefix + "journal budget exhausted for today"
         if cfg.dry_run:
             print(f"\n[dry-run] journal entry:\n{entry}\n")
-            return "dry run (journal entry not written)"
+            return prefix + "dry run (journal entry not written)"
         store.append_journal(entry)
         log.info("Journal entry written (%d chars).", len(entry))
-        return "journal entry written"
+        return prefix + "journal entry written"
+
+    if call.name == REMINDER_TOOL:
+        return prefix + _schedule(cfg, store, call.input, recipients, self_addrs)
 
     if call.name == SEND_TOOL:
-        return _send(client, cfg, gmail, store, call.input, recipients,
-                     self_addrs, sent_today)
+        return prefix + _send(client, cfg, gmail, store, call.input, recipients,
+                              self_addrs, sent_today)
 
-    return f"unknown action: {call.name}"
+    return prefix + f"unknown action: {call.name}"
 
 
 def _send(client, cfg, gmail, store, payload: dict, recipients: list[str],

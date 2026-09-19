@@ -27,11 +27,17 @@ Two kinds of output:
 "Do nothing" is a first-class outcome and the expected one most of the
 time. An agent that must produce something every hour becomes a nuisance
 to everyone in its address book within a day.
+
+Heartbeats run on their own model — see `heartbeat_model` below. The
+reply path is the one where quality is visible to another person; the
+heartbeat is a small, bounded decision that fires around the clock, so
+it runs on the cheapest capable model by default.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 
 import costs
 import gmail_io
@@ -42,6 +48,51 @@ log = logging.getLogger("indi.outbound")
 SEND_TOOL = "send_new_message"
 JOURNAL_TOOL = "write_journal_entry"
 NOTHING_TOOL = "do_nothing"
+
+# The heartbeat's default model. Haiku, because a heartbeat is one short
+# decision made on a timer: most of them end in do_nothing, and paying
+# reply-grade rates for that around the clock is the easiest recurring
+# cost to avoid.
+DEFAULT_HEARTBEAT_MODEL = "claude-haiku-4-5"
+
+# Values of INDI_HEARTBEAT_MODEL that mean "use whatever the reply path
+# uses" rather than naming a model.
+_INHERIT_VALUES = {"inherit", "same", "reply", "default"}
+
+
+def heartbeat_model(cfg) -> str:
+    """Which model this heartbeat runs on.
+
+    Precedence:
+      1. INDI_HEARTBEAT_MODEL, looked up through config's platform-aware
+         `_env` so the usual _LINUX/_WINDOWS suffixes work. Set it to
+         "inherit" to go back to the reply model.
+      2. A `heartbeat_model` attribute, if config.py ever grows one.
+      3. Haiku.
+
+    config.py is protected from self-modification, which is why this
+    setting is read here rather than added to the Config dataclass.
+    """
+    value = ""
+    try:
+        import config as _config
+        getter = getattr(_config, "_env", None)
+        if callable(getter):
+            value = (getter("INDI_HEARTBEAT_MODEL") or "").strip()
+    except Exception:  # pragma: no cover - config import can't realistically fail
+        log.debug("Could not use config._env for the heartbeat model", exc_info=True)
+    if not value:
+        value = os.environ.get("INDI_HEARTBEAT_MODEL", "").strip()
+
+    if value:
+        if value.lower() in _INHERIT_VALUES:
+            return cfg.model
+        return value
+
+    configured = (getattr(cfg, "heartbeat_model", "") or "").strip()
+    if configured:
+        return configured
+    return DEFAULT_HEARTBEAT_MODEL
 
 
 def schemas(cfg, recipients: list[str], allow_new: bool) -> list[dict]:
@@ -168,24 +219,31 @@ def run_heartbeat(client, cfg, gmail, store, system_prompt: str,
         f"{journal_today} of {cfg.journal_max_per_day}."
     )
     try:
-        spent, calls = store.spend_since(24)
+        spent, ledger_calls = store.spend_since(24)
         budget_note += (
             f" Anthropic API spend in the last 24h: about ${spent:.2f} over "
-            f"{calls} call(s) — an estimate from token counts, not a bill."
+            f"{ledger_calls} call(s) — an estimate from token counts, not a bill."
         )
     except Exception:
         log.debug("Could not read the spend ledger for the budget note",
                   exc_info=True)
 
+    model = heartbeat_model(cfg)
+    if model != cfg.model:
+        log.info("Heartbeat running on %s (reply model is %s).", model, cfg.model)
+
     response = client.messages.create(
-        model=cfg.model,
+        model=model,
         max_tokens=cfg.max_tokens,
         system=system_prompt + HEARTBEAT_SYSTEM_SUFFIX,
         tools=tools,
         messages=[{"role": "user", "content": _context(cfg, store) + budget_note}],
     )
 
-    costs.record("heartbeat", cfg.model,
+    # Price against the model that actually ran, not the reply model —
+    # otherwise the saving this change exists for wouldn't show up in the
+    # ledger, and might even show up backwards.
+    costs.record("heartbeat", model,
                  costs.tokens_from_usage(getattr(response, "usage", None)))
 
     calls = [b for b in response.content if getattr(b, "type", "") == "tool_use"]

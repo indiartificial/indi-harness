@@ -242,6 +242,15 @@ class Config:
     max_history_search_results: int
     max_tool_loop_iterations: int
 
+    # --- conversation context ---
+    # How much of the surrounding email thread is put in front of the model
+    # with each reply. Zero on either of the first two turns thread context
+    # off entirely, which puts Indi back to answering each message as if it
+    # were the first one in the conversation.
+    max_thread_messages: int
+    max_thread_chars: int
+    max_quoted_chars: int
+
     # --- attachments ---
     max_incoming_attachment_mb: int
     upload_text_attachments: bool
@@ -338,6 +347,9 @@ class Config:
             enable_history_search=_bool("INDI_ENABLE_HISTORY_SEARCH", True),
             max_history_search_results=_int("INDI_MAX_HISTORY_SEARCH_RESULTS", 5),
             max_tool_loop_iterations=_int("INDI_MAX_TOOL_LOOP_ITERATIONS", 4),
+            max_thread_messages=_int("INDI_MAX_THREAD_MESSAGES", 10),
+            max_thread_chars=_int("INDI_MAX_THREAD_CHARS", 12000),
+            max_quoted_chars=_int("INDI_MAX_QUOTED_CHARS", 6000),
             max_incoming_attachment_mb=_int("INDI_MAX_INCOMING_ATTACHMENT_MB", 5),
             upload_text_attachments=_bool("INDI_UPLOAD_TEXT_ATTACHMENTS", False),
             max_inline_attachment_chars=_int("INDI_MAX_INLINE_ATTACHMENT_CHARS", 40000),

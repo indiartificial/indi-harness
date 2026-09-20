@@ -262,6 +262,22 @@ def get_detail(gmail, msg_id: str) -> dict:
     return gmail.users().messages().get(userId="me", id=msg_id, format="full").execute()
 
 
+def get_thread_messages(gmail, thread_id: str) -> list[dict]:
+    """Every message Gmail holds in this thread, including ones we sent.
+
+    One extra API call per reply, and the thing it buys is that Indi can
+    see the conversation it is part of.
+    """
+    if not thread_id:
+        return []
+    thread = (
+        gmail.users().threads()
+        .get(userId="me", id=thread_id, format="full")
+        .execute()
+    )
+    return thread.get("messages", []) or []
+
+
 def mark_as_read(gmail, msg_id: str) -> None:
     gmail.users().messages().modify(
         userId="me", id=msg_id, body={"removeLabelIds": ["UNREAD"]}
@@ -287,7 +303,8 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
     """Handles one message end to end. Returns a short outcome string.
     Raises only on genuinely unexpected errors, which the caller records
     as `failed` so the message can be retried next run."""
-    msg = gmail_io.extract_message(raw_message, cfg.max_body_chars)
+    msg = gmail_io.extract_message(raw_message, cfg.max_body_chars,
+                                   max_quoted_chars=cfg.max_quoted_chars)
     sender = msg["from_addr"]
     log.info("Message from %s — %s", msg["from_raw"], msg["subject"])
 
@@ -385,6 +402,38 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
     memory = memory_file.SenderMemory(drive, sender)
     pending = memory.pending_text(store)
 
+    # What was actually said earlier in this thread. The queue's "pending"
+    # rows and the memory file are summaries of past exchanges with this
+    # person in general; neither is the conversation now in progress, and a
+    # short reply like "yes, do that" means nothing without it.
+    thread_text, thread_count = "", 0
+    if cfg.max_thread_chars > 0 and cfg.max_thread_messages > 0:
+        try:
+            thread_text, thread_count = gmail_io.format_thread_context(
+                get_thread_messages(gmail, msg["thread_id"]),
+                exclude_msg_id=msg["gmail_msg_id"],
+                self_addrs=selves,
+                max_messages=cfg.max_thread_messages,
+                max_chars=cfg.max_thread_chars,
+            )
+        except Exception:
+            # Losing the thread costs context, not correctness — reply to
+            # the message on its own rather than failing it.
+            log.warning("Could not read the rest of thread %s.",
+                        msg["thread_id"], exc_info=True)
+    if thread_count:
+        log.info("Thread context: %d earlier message(s), %d chars.",
+                 thread_count, len(thread_text))
+
+    # The sender's own quotation is usually the same conversation again, so
+    # it is only worth its tokens when it holds something the thread didn't
+    # — a forward from another mailbox, most often.
+    quoted_text = ""
+    if gmail_io.quoted_adds_context(msg["quoted"], thread_text):
+        quoted_text = msg["quoted"]
+        log.info("Quoted text below the message adds %d chars the thread "
+                 "doesn't have.", len(quoted_text))
+
     attachment_blocks, uploaded_ids = claude_api.build_attachment_blocks(
         gmail, cfg, msg, claude, trusted
     )
@@ -403,6 +452,8 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
             attachment_blocks=attachment_blocks,
             local_runner=local_runner,
             self_code_runner=self_code_runner,
+            thread_text=thread_text,
+            quoted_text=quoted_text,
         )
     finally:
         claude_api.delete_uploaded_files(claude, uploaded_ids)

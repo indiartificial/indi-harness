@@ -12,8 +12,15 @@ Fixes over the previous version:
   * HTML-only email produces a body. The old parser only collected
     `text/plain` parts, so any `text/html`-only message reached Claude
     with an empty body.
-  * Quoted reply chains are trimmed, which keeps Sheets rows and memory
-    consolidations from carrying the same text over and over.
+  * Quoted reply chains are split off rather than merged into the body,
+    which keeps Sheets rows and memory consolidations from carrying the
+    same text over and over — while still leaving the chain available to
+    the caller, since for a while it was the only record of the earlier
+    conversation and throwing it away left Indi answering "yes, go ahead"
+    with no idea what it was agreeing to.
+  * The rest of a thread can be fetched and rendered as context
+    (`format_thread_context`), which is the first-hand version of what a
+    sender's quoting would have shown.
   * `Reply-To` is preferred over `From` when present.
   * The `References` chain is preserved rather than replaced.
   * Automated mail (autoresponders, list traffic, our own address) is
@@ -26,6 +33,7 @@ Fixes over the previous version:
 from __future__ import annotations
 
 import base64
+import datetime
 import mimetypes
 import os
 import re
@@ -99,22 +107,34 @@ def html_to_text(html: str) -> str:
 # Kept conservative on purpose: over-trimming loses real content, which is
 # worse than carrying a bit of quoted text.
 _QUOTE_MARKERS = [
-    re.compile(r"^\s*On .{0,250}?\bwrote:\s*$", re.MULTILINE),
+    # Gmail wraps the attribution line, so "On <date> <name> <address>" and
+    # the trailing "wrote:" routinely land on different lines. Matching only
+    # within one line meant this pattern missed, the marker stayed in the
+    # body, and the '>' pass below then stripped everything it introduced —
+    # which is how a reply arrived reading "Yes, please do.\n\nOn Sun, 20
+    # Sep 2026 ... wrote:" with the entire quoted thread gone. `[\s\S]` here
+    # crosses newlines; the length bound keeps it from swallowing the
+    # message when some later line happens to end in "wrote:".
+    re.compile(r"^[ \t>]*On\b[\s\S]{0,300}?\bwrote:[ \t\r]*$", re.MULTILINE),
     re.compile(r"^\s*-{2,}\s*Original Message\s*-{2,}\s*$", re.MULTILINE | re.IGNORECASE),
     re.compile(r"^\s*-{2,}\s*Forwarded message\s*-{2,}\s*$", re.MULTILINE | re.IGNORECASE),
     re.compile(r"^\s*_{10,}\s*$", re.MULTILINE),
     re.compile(r"^\s*Sent from my \w+\s*$", re.MULTILINE),
 ]
 
-_MIN_KEPT_CHARS = 40
 
+def split_quoted(body: str) -> tuple[str, str]:
+    """Split a message into (newly written text, quoted chain below it).
 
-def trim_quoted(body: str) -> str:
-    """Cut the message at the first quoted-reply marker, and drop a
-    trailing run of '>' quoted lines. Returns the original text if
-    trimming would leave almost nothing."""
+    The quoted part used to be thrown away here. That is right for the
+    Sheets row and for memory — the same text repeating down a long thread
+    is noise — but it was also the only copy of the earlier conversation
+    the model ever got, so a reply saying "yes, do that" above a quoted
+    thread reached Claude as three words with no referent. Both halves are
+    returned now; the caller decides what to show.
+    """
     if not body:
-        return body
+        return "", ""
 
     cut = len(body)
     for pattern in _QUOTE_MARKERS:
@@ -122,17 +142,20 @@ def trim_quoted(body: str) -> str:
         if m and m.start() < cut:
             cut = m.start()
 
-    trimmed = body[:cut].rstrip()
+    visible = body[:cut].rstrip()
+    quoted = body[cut:].strip()
 
-    # Remove a trailing block of quoted lines ('> ...') left behind.
-    lines = trimmed.split("\n")
+    # A trailing block of '> ...' lines is quoted material too, even when no
+    # attribution line introduced it.
+    lines = visible.split("\n")
+    tail: list[str] = []
     while lines and (lines[-1].lstrip().startswith(">") or not lines[-1].strip()):
-        lines.pop()
-    trimmed = "\n".join(lines).rstrip()
+        tail.append(lines.pop())
+    visible = "\n".join(lines).rstrip()
+    if tail:
+        quoted = ("\n".join(reversed(tail)).strip() + "\n" + quoted).strip()
 
-    if len(trimmed) < _MIN_KEPT_CHARS and len(body.strip()) >= _MIN_KEPT_CHARS:
-        return body.strip()
-    return trimmed or body.strip()
+    return visible, quoted
 
 
 # ---------------------------------------------------------------------------
@@ -158,8 +181,14 @@ def _addr_of(header_value: str) -> str:
     return (parseaddr(header_value or "")[1] or "").strip().lower()
 
 
-def extract_message(message: dict, max_body_chars: int) -> dict:
-    """Turns a Gmail `format=full` message into a normalised dict."""
+def extract_message(message: dict, max_body_chars: int,
+                    max_quoted_chars: int = 0) -> dict:
+    """Turns a Gmail `format=full` message into a normalised dict.
+
+    `max_quoted_chars` is the budget for the quoted chain hanging below the
+    sender's own text. Zero — the default, and what the Sheets row and
+    memory want — discards it.
+    """
     payload = message.get("payload", {}) or {}
     headers = normalise_headers(payload)
 
@@ -168,7 +197,12 @@ def extract_message(message: dict, max_body_chars: int) -> dict:
     attachment_refs: list[dict] = []
 
     def decode(data: str) -> str:
-        return base64.urlsafe_b64decode(data).decode("utf-8", errors="replace")
+        text = base64.urlsafe_b64decode(data).decode("utf-8", errors="replace")
+        # Mail arrives CRLF-terminated. Normalising here means every
+        # pattern below can anchor on "\n" alone — a line-ending the quote
+        # markers didn't allow for was enough, on its own, to leave a whole
+        # quoted thread unrecognised.
+        return text.replace("\r\n", "\n").replace("\r", "\n")
 
     def walk(part: dict) -> None:
         filename = part.get("filename")
@@ -204,12 +238,25 @@ def extract_message(message: dict, max_body_chars: int) -> dict:
             raw = decode(top["data"])
             body = html_to_text(raw) if payload.get("mimeType") == "text/html" else raw
 
-    body = trim_quoted(body.strip())
+    body, quoted = split_quoted(body.strip())
+    if not body and quoted:
+        # Nothing but a quoted chain — a bare forward. Show it as the
+        # message rather than reporting an empty body.
+        body, quoted = quoted, ""
 
     truncated = False
     if len(body) > max_body_chars:
         body = body[:max_body_chars] + "\n\n[... message truncated ...]"
         truncated = True
+
+    quoted_truncated = False
+    if max_quoted_chars <= 0:
+        quoted = ""
+    elif len(quoted) > max_quoted_chars:
+        # Keep the top of the chain: it is the most recent exchange, and
+        # the deepest nesting at the bottom is the least useful.
+        quoted = quoted[:max_quoted_chars] + "\n\n[... quoted history truncated ...]"
+        quoted_truncated = True
 
     from_raw = headers.get("from", "")
     reply_to_raw = headers.get("reply-to", "")
@@ -234,9 +281,133 @@ def extract_message(message: dict, max_body_chars: int) -> dict:
         "references": headers.get("references", ""),
         "body": body,
         "body_truncated": truncated,
+        "quoted": quoted,
+        "quoted_truncated": quoted_truncated,
         "attachment_refs": attachment_refs,
         "internal_date": internal_date,
     }
+
+
+# ---------------------------------------------------------------------------
+# THE REST OF THE THREAD
+# ---------------------------------------------------------------------------
+#
+# A reply arrives holding only its own new sentences: everything earlier is
+# either quoted below it (and stripped above, as noise) or not present at
+# all. The earlier messages do exist, though — Gmail keeps them in the same
+# thread — so they can be fetched and handed over as real, first-hand text
+# rather than inferred from whatever the sender's client chose to quote.
+
+
+def _thread_timestamp(internal_date_ms: int) -> str:
+    if not internal_date_ms:
+        return "date unknown"
+    try:
+        when = datetime.datetime.fromtimestamp(
+            internal_date_ms / 1000, tz=datetime.timezone.utc
+        )
+    except (OverflowError, OSError, ValueError):
+        return "date unknown"
+    return when.strftime("%Y-%m-%d %H:%M UTC")
+
+
+def format_thread_context(raw_messages: list[dict], exclude_msg_id: str = "",
+                          self_addrs: set[str] | None = None,
+                          max_messages: int = 10,
+                          max_chars: int = 12000) -> tuple[str, int]:
+    """Render the earlier messages of a thread, oldest first.
+
+    Returns (text, count). Only each message's own new text is used, so a
+    thread of ten replies reads as ten entries rather than ten nested
+    copies of itself. When the budget binds, the oldest go first.
+    """
+    selves = {a.lower() for a in (self_addrs or set())}
+    entries: list[str] = []
+
+    ordered = sorted(raw_messages or [],
+                     key=lambda m: int(m.get("internalDate", 0) or 0))
+    for raw in ordered:
+        if exclude_msg_id and raw.get("id") == exclude_msg_id:
+            continue
+        try:
+            parsed = extract_message(raw, max_body_chars=max_chars)
+        except Exception:
+            # One unparseable message in a thread shouldn't cost us the
+            # rest of the conversation.
+            continue
+        text = (parsed["body"] or "").strip()
+        if not text:
+            continue
+        who = parsed["from_raw"] or parsed["from_addr"] or "(unknown sender)"
+        if parsed["from_addr"] and parsed["from_addr"] in selves:
+            who = f"{who} — this was you"
+        entries.append(f"[{_thread_timestamp(parsed['internal_date'])}] "
+                       f"{who}:\n{text}")
+
+    if not entries:
+        return "", 0
+
+    entries = entries[-max_messages:] if max_messages > 0 else entries
+
+    separator = "\n\n"
+    while len(entries) > 1 and \
+            len(separator.join(entries)) > max_chars:
+        entries.pop(0)
+    text = separator.join(entries)
+    if len(text) > max_chars:
+        text = text[:max_chars] + "\n\n[... earlier thread truncated ...]"
+    return text, len(entries)
+
+
+# Lines a mail client generates rather than a person: they differ between
+# the fetched copy of a message and a quotation of it, so comparing them
+# would report a difference in wording where there is none in substance.
+# Note how narrowly the "On ..." arm is drawn: it needs an address on the
+# line. "On thinking: the mechanism already exists" is prose, and dropping
+# it from one copy of a message but not the other desynchronises the two
+# word streams and reports a difference that isn't there.
+_ATTRIBUTION_LINE = re.compile(
+    r"^(?:.*\bwrote:|On\b.{0,200}@\S+.*|-{2,}.*-{2,}|_{4,}"
+    r"|(?:From|Sent|To|Cc|Subject|Date)\s*:.*)$",
+    re.IGNORECASE,
+)
+
+
+def _comparable_text(text: str) -> str:
+    """One whitespace-normalised string, quote markers and client-generated
+    lines removed. Flattening to a single line is what makes the comparison
+    survive re-wrapping: a quotation of a message is the same words as the
+    message, broken across lines at a different width."""
+    kept = []
+    for line in (text or "").splitlines():
+        line = re.sub(r"^[ \t>]+", "", line).strip()
+        if not line or _ATTRIBUTION_LINE.match(line):
+            continue
+        kept.append(line)
+    return re.sub(r"\s+", " ", " ".join(kept)).strip().lower()
+
+
+def quoted_adds_context(quoted: str, thread_text: str) -> bool:
+    """True when the quoted chain holds substance the fetched thread does
+    not — a conversation forwarded from some other mailbox, typically.
+
+    Without this check every reply would carry its history twice: once as
+    fetched thread messages and again as the sender's quotation of them.
+    """
+    q = _comparable_text(quoted)
+    if len(q) < 40:
+        return False
+    if not (thread_text or "").strip():
+        return True
+
+    haystack = _comparable_text(thread_text)
+    words = q.split()
+    # Overlapping runs of words, sampled rather than exhaustive — enough to
+    # tell "the same conversation again" from "something else entirely".
+    shingles = [" ".join(words[i:i + 8])
+                for i in range(0, max(1, len(words) - 7), 4)]
+    missing = sum(1 for s in shingles if s not in haystack)
+    return missing > len(shingles) * 0.25
 
 
 # ---------------------------------------------------------------------------
@@ -358,7 +529,9 @@ def classify_message(msg: dict, self_addrs: set[str]) -> tuple[bool, str]:
                            "delivery status notification", "mail delivery")):
         return False, f"autoresponder subject: {subject[:40]}"
 
-    if not (msg.get("body") or "").strip() and not msg.get("attachment_refs"):
+    if (not (msg.get("body") or "").strip()
+            and not (msg.get("quoted") or "").strip()
+            and not msg.get("attachment_refs")):
         return False, "empty message body and no attachments"
 
     # `delivered_to` is collected above for future use (e.g. detecting

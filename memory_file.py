@@ -3,7 +3,7 @@ memory_file.py
 
 A running, Claude-authored memory file kept in Google Drive.
 
-Two substantive changes from the previous version:
+Three substantive changes from the previous version:
 
 1. **Memory is partitioned per correspondent.** There used to be one
    "Indi Memory" file holding distilled facts from every sender, and it
@@ -15,12 +15,24 @@ Two substantive changes from the previous version:
    structural fix, not a prompt-level one, which is why it's worth the
    extra files in Drive.
 
-2. **The overwrite is guarded.** Consolidation used to call Claude with a
-   hardcoded `max_tokens=1024` and write whatever came back straight over
-   the only copy. A truncated response, or an empty one, permanently
-   destroyed the memory with no warning and no backup. Now the response is
-   checked for truncation and implausible shrinkage, and the previous
-   version is copied aside before the new one lands.
+2. **The overwrite is guarded, and the backup is versioned.**
+   Consolidation used to call Claude with a hardcoded `max_tokens=1024`
+   and write whatever came back straight over the only copy. A truncated
+   response, or an empty one, permanently destroyed the memory with no
+   warning and no backup. Now the response is checked for truncation and
+   implausible shrinkage, and the previous version is copied aside before
+   the new one lands. That copy used to be a single "(previous)" file
+   which was itself overwritten each time — so two bad consolidations in
+   a row lost both the file and its backup. Backups are now timestamped
+   and a few generations are kept.
+
+3. **Pending exchanges can be filtered.** The reply path sends the live
+   thread verbatim *and* the not-yet-folded exchanges with this sender;
+   in an active conversation those are largely the same messages. The
+   caller can now pass the Gmail ids it is already showing as thread
+   context, and they are left out of the pending block. Consolidation is
+   unaffected — it still folds everything, because the memory file has to
+   end up complete regardless of what one reply happened to show.
 
 The watermark (`folded:` in the file header) records how many of that
 sender's messages have already been folded in, so "what's not in memory
@@ -48,6 +60,11 @@ _HEADER_RE = re.compile(
     r"folded:\s*(?P<folded>\d+)",
     re.IGNORECASE,
 )
+
+# How many timestamped backups of a sender's memory file to keep. Small:
+# the point is to survive a couple of bad consolidations in a row, not to
+# keep an archive.
+DEFAULT_BACKUP_VERSIONS = 3
 
 CONSOLIDATION_SYSTEM_PROMPT = """You maintain a running memory file about ONE \
 correspondent of an AI email assistant named Indi Artificial. You will be given \
@@ -86,7 +103,20 @@ def memory_file_name(sender_addr: str) -> str:
 
 
 def backup_file_name(sender_addr: str) -> str:
+    """The legacy single-slot backup name. Still read/recognised so an
+    existing deployment's one existing backup isn't orphaned."""
     return f"Indi Memory - {_slug(sender_addr)} (previous)"
+
+
+def backup_name_prefix(sender_addr: str) -> str:
+    return f"Indi Memory - {_slug(sender_addr)} (backup "
+
+
+def timestamped_backup_name(sender_addr: str, when=None) -> str:
+    stamp = (when or datetime.datetime.now(datetime.timezone.utc)).strftime(
+        "%Y%m%d-%H%M%S"
+    )
+    return f"{backup_name_prefix(sender_addr)}{stamp})"
 
 
 def _escape(value: str) -> str:
@@ -148,6 +178,69 @@ def write_file(drive_service, name: str, text: str,
     return created["id"]
 
 
+def list_backups(drive_service, sender_addr: str) -> list[dict]:
+    """Existing timestamped backups for one sender, newest first.
+
+    The name carries the timestamp, so sorting by name is sorting by age
+    and no extra metadata round-trip is needed.
+    """
+    prefix = backup_name_prefix(sender_addr)
+    files = (
+        drive_service.files()
+        .list(
+            q=f"name contains '{_escape(prefix)}' and trashed = false",
+            spaces="drive",
+            fields="files(id, name)",
+        )
+        .execute()
+        .get("files", [])
+    )
+    files = [f for f in files if f.get("name", "").startswith(prefix)]
+    files.sort(key=lambda f: f.get("name", ""), reverse=True)
+    return files
+
+
+def prune_backups(drive_service, sender_addr: str, keep: int) -> int:
+    """Trash all but the newest `keep` backups. Returns how many went."""
+    if keep < 1:
+        keep = 1
+    removed = 0
+    for stale in list_backups(drive_service, sender_addr)[keep:]:
+        try:
+            drive_service.files().update(
+                fileId=stale["id"], body={"trashed": True}
+            ).execute()
+            removed += 1
+        except Exception as exc:
+            log.debug("Could not trash old memory backup %s: %s",
+                      stale.get("name"), exc)
+    return removed
+
+
+def save_backup(drive_service, sender_addr: str, raw_text: str, keep: int) -> bool:
+    """Write a new timestamped copy of the memory file, then prune.
+
+    Deliberately a fresh file each time rather than an update of one
+    slot: the failure this guards against is a *sequence* of bad writes,
+    and a single overwritten slot is no protection against that.
+    """
+    if not raw_text.strip():
+        return False
+    try:
+        write_file(drive_service, timestamped_backup_name(sender_addr), raw_text)
+    except Exception as exc:
+        log.warning("Backup of memory for %s failed (continuing): %s",
+                    sender_addr, exc)
+        return False
+    try:
+        removed = prune_backups(drive_service, sender_addr, keep)
+        if removed:
+            log.debug("Pruned %d old memory backup(s) for %s.", removed, sender_addr)
+    except Exception as exc:
+        log.debug("Could not prune old memory backups for %s: %s", sender_addr, exc)
+    return True
+
+
 # ---------------------------------------------------------------------------
 # PARSE / SERIALISE
 # ---------------------------------------------------------------------------
@@ -189,13 +282,25 @@ class SenderMemory:
         self.folded, self.body = parse_memory(raw)
         self.raw = raw
 
-    def pending_rows(self, store: "sheets_queue.SheetStore") -> list[dict]:
-        """That sender's messages not yet folded into their memory file."""
-        rows = store.messages_for_sender(self.sender_addr)
-        return rows[self.folded:]
+    def pending_rows(self, store: "sheets_queue.SheetStore",
+                     exclude_msg_ids=None) -> list[dict]:
+        """That sender's messages not yet folded into their memory file.
 
-    def pending_text(self, store: "sheets_queue.SheetStore") -> str:
-        rows = self.pending_rows(store)
+        `exclude_msg_ids` drops specific Gmail ids — used by the reply
+        path for exchanges it is already sending verbatim as thread
+        context. Consolidation passes nothing, so the memory file still
+        ends up covering every message.
+        """
+        rows = store.messages_for_sender(self.sender_addr)
+        rows = rows[self.folded:]
+        if exclude_msg_ids:
+            excluded = set(exclude_msg_ids)
+            rows = [r for r in rows if r.get("gmail_msg_id") not in excluded]
+        return rows
+
+    def pending_text(self, store: "sheets_queue.SheetStore",
+                     exclude_msg_ids=None) -> str:
+        rows = self.pending_rows(store, exclude_msg_ids=exclude_msg_ids)
         if not rows:
             return ""
         return sheets_queue.format_exchanges(rows, store.responses_by_message())
@@ -257,15 +362,11 @@ def consolidate(client, cfg, drive_service, store, sender_addr: str) -> bool:
         return False
 
     # Keep the previous version before the destructive write. The memory
-    # file is the system's only long-term state.
-    if cfg.memory_keep_backup and memory.raw.strip():
-        try:
-            backup_name = backup_file_name(sender_addr)
-            write_file(drive_service, backup_name, memory.raw,
-                       find_file_id(drive_service, backup_name))
-        except Exception as exc:
-            log.warning("Backup of memory for %s failed (continuing): %s",
-                        sender_addr, exc)
+    # file is the system's only long-term state, so the copy is versioned
+    # rather than a single slot that the next consolidation would clobber.
+    if cfg.memory_keep_backup:
+        keep = getattr(cfg, "memory_backup_versions", DEFAULT_BACKUP_VERSIONS)
+        save_backup(drive_service, sender_addr, memory.raw, keep)
 
     total_folded = memory.folded + len(pending)
     write_file(

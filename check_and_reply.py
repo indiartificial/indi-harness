@@ -71,6 +71,12 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive.file",
 ]
 
+# The sign-off that ends every outgoing message. It is also asked for in
+# the system prompt, but a rule that only lives in a prompt is a rule the
+# model can quietly forget on any given run — and it did. `ensure_signature`
+# below makes it a property of the code path instead.
+SIGNATURE = "--- Indi"
+
 log = logging.getLogger("indi")
 
 
@@ -152,6 +158,22 @@ def get_credentials(cfg: Config):
         log.debug("On Windows, file permissions on %s are not enforced by chmod.",
                   cfg.token_path)
     return creds
+
+
+def ensure_signature(body: str) -> str:
+    """Guarantee that an outgoing body ends with the signature.
+
+    A no-op if the signature is already the last non-empty line (or close
+    to it — a stray blank line or a postscript-free sign-off underneath is
+    still fine). Empty bodies are left alone; the caller refuses to send
+    those anyway.
+    """
+    if not body or not body.strip():
+        return body
+    tail = [line.strip() for line in body.strip().splitlines() if line.strip()]
+    if SIGNATURE in tail[-3:]:
+        return body
+    return body.rstrip() + "\n\n" + SIGNATURE
 
 
 def load_system_prompt(cfg: Config, self_address: str) -> str:
@@ -436,6 +458,11 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
     if attachments:
         log.info("Reply carries %d generated attachment(s): %s",
                  len(attachments), ", ".join(n for n, _ in attachments))
+
+    signed_body = ensure_signature(clean_body)
+    if signed_body != clean_body:
+        log.info("Signature was missing from the reply; appended it.")
+        clean_body = signed_body
 
     safe_attachments = [
         (gmail_io.sanitise_filename(name), content) for name, content in attachments

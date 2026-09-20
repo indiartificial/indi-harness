@@ -38,6 +38,16 @@ Fixes over the previous version:
 
   * **Uploaded files are deleted** after the reply. They used to
     accumulate in the account's Files storage forever.
+
+  * **The prompt is cached past the system block.** The system prompt
+    carries a cache breakpoint, but everything after it used to be
+    re-uploaded as fresh input on every iteration of the tool loop — so a
+    reply that read a large file paid for that file again on each pass.
+    Two further breakpoints are now set: one static, at the end of the
+    opening user turn (memory, pending exchanges, thread, the email
+    itself), and one rolling, moved onto the newest tool result each pass
+    and cleared from the previous one. Three breakpoints in total, within
+    the limit of four.
 """
 
 from __future__ import annotations
@@ -100,6 +110,32 @@ TEXT_EXTENSIONS = {
 
 UNTRUSTED_OPEN = "<<<INCOMING_EMAIL_UNTRUSTED>>>"
 UNTRUSTED_CLOSE = "<<<END_INCOMING_EMAIL>>>"
+
+# Block types documented as accepting a cache_control breakpoint. A
+# container_upload block is deliberately absent: rather than risk a 400 on
+# a block type the API may not accept it on, the breakpoint falls back to
+# the last eligible block before it, which still caches nearly everything.
+CACHEABLE_BLOCK_TYPES = {"text", "image", "document", "tool_result"}
+
+
+def _mark_cache_point(blocks: list[dict]) -> dict | None:
+    """Put a cache breakpoint on the last block that can carry one.
+
+    Returns the block it marked, so a rolling breakpoint can be cleared
+    off it later. Returns None if nothing in the list is eligible.
+    """
+    for block in reversed(blocks or []):
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") in CACHEABLE_BLOCK_TYPES:
+            block["cache_control"] = {"type": "ephemeral"}
+            return block
+    return None
+
+
+def _clear_cache_point(block: dict | None) -> None:
+    if isinstance(block, dict):
+        block.pop("cache_control", None)
 
 
 def history_search_schema(scoped_to_sender: bool) -> dict:
@@ -580,6 +616,12 @@ def generate_reply(client, cfg, system_prompt: str, msg: dict,
     if attachment_blocks:
         user_blocks.extend(attachment_blocks)
 
+    # Static breakpoint at the end of the opening turn. Everything before
+    # it — system prompt, memory, pending exchanges, thread, the email,
+    # any attachments — is identical on every iteration of the tool loop,
+    # so without this it is re-billed as fresh input each pass.
+    _mark_cache_point(user_blocks)
+
     messages = [{"role": "user", "content": user_blocks}]
 
     kwargs = dict(model=cfg.model, max_tokens=cfg.max_tokens, system=system_blocks)
@@ -604,6 +646,11 @@ def generate_reply(client, cfg, system_prompt: str, msg: dict,
     # Empty means "search everything"; otherwise the search is pinned to
     # this sender's own messages, enforced here rather than in the prompt.
     restrict_to = "" if scope_all_history else msg["from_addr"]
+
+    # The rolling breakpoint: whichever tool-result block currently carries
+    # one. Cleared before the next is set, so the request never holds more
+    # than two non-system breakpoints (the limit is four).
+    rolling_block: dict | None = None
 
     for _ in range(max(1, cfg.max_tool_loop_iterations)):
         stats["iterations"] += 1
@@ -690,6 +737,14 @@ def generate_reply(client, cfg, system_prompt: str, msg: dict,
             if is_error:
                 block["is_error"] = True
             results.append(block)
+
+        # Move the rolling breakpoint onto the newest tool result, so the
+        # next iteration reads this turn's results — often the largest
+        # thing in the prompt — from cache rather than re-uploading them.
+        if results:
+            _clear_cache_point(rolling_block)
+            rolling_block = _mark_cache_point(results)
+
         messages.append({"role": "user", "content": results})
 
     if response is None:

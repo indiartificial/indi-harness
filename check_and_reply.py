@@ -37,6 +37,11 @@ they mattered:
 
 6. **Non-interactive auth.** Under cron, a missing/expired token used to
    drop into `run_local_server()`, which waits forever for a browser.
+
+7. **The same history is not sent twice.** The queue's not-yet-folded
+   exchanges and the live thread overlap almost completely during an
+   active conversation; the ones already present in the thread text are
+   left out of the pending block.
 """
 
 from __future__ import annotations
@@ -76,6 +81,12 @@ SCOPES = [
 # model can quietly forget on any given run — and it did. `ensure_signature`
 # below makes it a property of the code path instead.
 SIGNATURE = "--- Indi"
+
+# How much of a stored message body has to turn up in the rendered thread
+# before that exchange counts as already shown. Long enough not to match
+# by coincidence, short enough to survive the per-message clipping the
+# thread renderer applies.
+PENDING_PROBE_CHARS = 200
 
 log = logging.getLogger("indi")
 
@@ -295,6 +306,42 @@ def self_addresses(gmail) -> set[str]:
 
 
 # ---------------------------------------------------------------------------
+# NOT SENDING THE SAME HISTORY TWICE
+# ---------------------------------------------------------------------------
+
+def _normalise(text: str) -> str:
+    return " ".join((text or "").split()).lower()
+
+
+def pending_shown_in_thread(row_body: str, thread_norm: str,
+                            probe_chars: int = PENDING_PROBE_CHARS) -> bool:
+    """Is this stored exchange already visible in the rendered thread?
+
+    Checked by content, not just by id: the thread renderer drops older
+    messages and clips to a character budget, so an id being in the
+    thread is not proof its text survived. Erring towards False keeps a
+    duplicate; erring towards True would lose context, which is worse.
+    """
+    body = _normalise(row_body)
+    if len(body) < 40 or not thread_norm:
+        return False
+    return body[:probe_chars] in thread_norm
+
+
+def redundant_pending_ids(pending_rows: list[dict], thread_ids: set[str],
+                          thread_text: str) -> set[str]:
+    thread_norm = _normalise(thread_text)
+    if not thread_norm:
+        return set()
+    return {
+        row.get("gmail_msg_id", "")
+        for row in pending_rows
+        if row.get("gmail_msg_id") in thread_ids
+        and pending_shown_in_thread(row.get("body", ""), thread_norm)
+    } - {""}
+
+
+# ---------------------------------------------------------------------------
 # PER-MESSAGE PIPELINE
 # ---------------------------------------------------------------------------
 
@@ -400,17 +447,18 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
 
     # --- context --------------------------------------------------------
     memory = memory_file.SenderMemory(drive, sender)
-    pending = memory.pending_text(store)
 
     # What was actually said earlier in this thread. The queue's "pending"
     # rows and the memory file are summaries of past exchanges with this
     # person in general; neither is the conversation now in progress, and a
     # short reply like "yes, do that" means nothing without it.
     thread_text, thread_count = "", 0
+    thread_messages: list[dict] = []
     if cfg.max_thread_chars > 0 and cfg.max_thread_messages > 0:
         try:
+            thread_messages = get_thread_messages(gmail, msg["thread_id"])
             thread_text, thread_count = gmail_io.format_thread_context(
-                get_thread_messages(gmail, msg["thread_id"]),
+                thread_messages,
                 exclude_msg_id=msg["gmail_msg_id"],
                 self_addrs=selves,
                 max_messages=cfg.max_thread_messages,
@@ -424,6 +472,19 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
     if thread_count:
         log.info("Thread context: %d earlier message(s), %d chars.",
                  thread_count, len(thread_text))
+
+    # The un-folded exchanges are a second rendering of the same recent
+    # history. Where the thread already carries a message verbatim, the
+    # summary copy is pure duplication: paid for twice, and two slightly
+    # different versions of one past for the model to reconcile.
+    thread_ids = {m.get("id", "") for m in thread_messages} - {""}
+    already_shown = redundant_pending_ids(
+        memory.pending_rows(store), thread_ids, thread_text
+    )
+    pending = memory.pending_text(store, exclude_msg_ids=already_shown)
+    if already_shown:
+        log.info("Dropped %d pending exchange(s) already present in the thread.",
+                 len(already_shown))
 
     # The sender's own quotation is usually the same conversation again, so
     # it is only worth its tokens when it holds something the thread didn't

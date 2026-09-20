@@ -212,7 +212,7 @@ content there, not a description of what the file would contain. Everything
 outside the blocks is the visible email body. Only attach a file when it beats
 writing the information directly; most replies need no attachment.
 
-Attachments carry file text only. Don't name one .pdf, .xlsx, or .docx — the script
+Attachments carry text only. Don't name one .pdf, .xlsx, or .docx — the script
 will rename it to .txt rather than mislabel it.
 
 CRITICAL: saying you attached something does not attach it. If your reply says a

@@ -282,6 +282,15 @@ class Config:
     journal_max_per_day: int
     heartbeat_journal_entries: int
 
+    # --- daily newsletter (see newsletter.py) ---
+    # The hour is UTC and the cap is on the size of the subscriber list.
+    # Neither is a budget in the sense the settings above are: the
+    # newsletter goes to people who opted in, so it is bounded by one
+    # issue a day and by how many people may be on the list at once,
+    # rather than by how much unsolicited mail Indi may start.
+    newsletter_hour_utc: int
+    newsletter_max_subscribers: int
+
     # --- self-modification ---
     enable_self_code: bool
     self_code_senders: tuple[str, ...]
@@ -398,6 +407,8 @@ class Config:
                 "INDI_OUTBOUND_ALLOW_NEW_RECIPIENTS", False),
             journal_max_per_day=_int("INDI_JOURNAL_MAX_PER_DAY", 24),
             heartbeat_journal_entries=_int("INDI_HEARTBEAT_JOURNAL_ENTRIES", 10),
+            newsletter_hour_utc=_int("INDI_NEWSLETTER_HOUR_UTC", 13),
+            newsletter_max_subscribers=_int("INDI_NEWSLETTER_MAX_SUBSCRIBERS", 50),
             enable_self_code=_bool("INDI_ENABLE_SELF_CODE", True),
             self_code_senders=_csv("INDI_SELF_CODE_SENDERS"),
             self_code_auto_apply=_bool("INDI_SELF_CODE_AUTO_APPLY", True),

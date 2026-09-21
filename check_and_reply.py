@@ -637,14 +637,14 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
             store.set_status(row, sheets_queue.STATUS_FAILED, "empty reply from model")
         return "no reply generated (left unread for retry)"
 
-    clean_body, attachments, warnings = claude_api.extract_outgoing_attachments(
+    clean_body, out_attachments, warnings = claude_api.extract_outgoing_attachments(
         reply_text, cfg.max_outgoing_attachment_bytes
     )
     for warning in warnings:
         log.warning("%s", warning)
-    if attachments:
+    if out_attachments:
         log.info("Reply carries %d generated attachment(s): %s",
-                 len(attachments), ", ".join(n for n, _ in attachments))
+                 len(out_attachments), ", ".join(n for n, _ in out_attachments))
 
     # Re-papering: the sender accepted an older version, so the reply is
     # still theirs but the current terms travel with it. Added before the
@@ -660,7 +660,7 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
 
     safe_attachments = [
         (gmail_io.sanitise_filename(name), content)
-        for name, content in [*attachments, *gate.attachments]
+        for name, content in [*out_attachments, *gate.attachments]
     ]
 
     if cfg.dry_run:
@@ -691,35 +691,80 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
         gmail.users().drafts().create(userId="me", body={"message": mime}).execute()
         outcome = "drafted"
 
-    # Record the response only after the mail actually went somewhere, so
-    # the sheets never claim a reply that doesn't exist.
-    store.append_response(msg["gmail_msg_id"], sender, clean_body)
+    # --- after the mail has gone ----------------------------------------
+    # Everything below this line runs with a reply already in the world,
+    # and that changes what an exception means. Up to here, raising is the
+    # right thing: the caller marks the row failed, the message stays
+    # unread, and the next run tries again. After the send, a raise means
+    # the next run finds an unread message with a non-terminal row and
+    # replies to it a second time — once per run, forever. That happened,
+    # and it happened because an AttributeError in the attachment
+    # bookkeeping below sat between the send and the two lines that stop
+    # the message coming back.
+    #
+    # So those two go first, and everything after them is bookkeeping that
+    # is logged and swallowed. A missing record is a blemish; a duplicate
+    # reply to a real person is not.
+    #
+    # The two guards back each other up, which is why neither of them is
+    # allowed to raise either: a terminal row means the next run
+    # recognises the message and marks it read itself, and a message
+    # already marked read is never fetched again even if its row was left
+    # saying `queued`. Getting back into the loop now takes two
+    # independent failures rather than one.
+    try:
+        store.set_status(row, sheets_queue.STATUS_REPLIED, outcome)
+    except Exception:
+        log.warning("Reply %s but the queue row could not be updated.",
+                    outcome, exc_info=True)
+    try:
+        mark_as_read(gmail, msg["gmail_msg_id"])
+    except Exception:
+        log.warning("Reply %s but the message could not be marked read.",
+                    outcome, exc_info=True)
+    log.info("Reply %s.", outcome)
+
+    # The response row is written only now, after the mail actually went
+    # somewhere, so the sheets never claim a reply that doesn't exist.
+    try:
+        store.append_response(msg["gmail_msg_id"], sender, clean_body)
+    except Exception:
+        log.warning("Could not record the response for %s.", sender,
+                    exc_info=True)
 
     # The outgoing files, kept for the same reason the incoming ones are:
     # "the document you sent me" is a question about a real file, and
     # until now the only copy was in the recipient's mailbox. Stored after
     # the send, so the store never holds something that never went out.
-    for name, content in safe_attachments:
-        rel = attachments.store_text(
-            cfg, msg["gmail_msg_id"], name, content, attachments.DIRECTION_OUT,
-            sender=sender, subject=msg["subject"],
-        )
-        if rel:
-            stored_paths.append(rel)
-    if stored_paths:
-        store.set_attachments(row, stored_paths)
-
-    store.set_status(row, sheets_queue.STATUS_REPLIED, outcome)
-    mark_as_read(gmail, msg["gmail_msg_id"])
-    log.info("Reply %s.", outcome)
+    try:
+        for name, content in safe_attachments:
+            rel = attachments.store_text(
+                cfg, msg["gmail_msg_id"], name, content, attachments.DIRECTION_OUT,
+                sender=sender, subject=msg["subject"],
+            )
+            if rel:
+                stored_paths.append(rel)
+        if stored_paths:
+            store.set_attachments(row, stored_paths)
+    except Exception:
+        log.warning("Could not store the outgoing attachment copies.",
+                    exc_info=True)
 
     # Only now is it true that the new terms were sent. Recording it any
     # earlier would mean a reply that failed to go out still counted as
     # having delivered them.
     if gate.commit is not None:
-        gate.commit()
+        try:
+            gate.commit()
+        except Exception:
+            log.warning("Could not record that the terms went out to %s.",
+                        sender, exc_info=True)
 
-    memory_file.consolidate(claude, cfg, drive, store, sender)
+    try:
+        memory_file.consolidate(claude, cfg, drive, store, sender)
+    except Exception:
+        log.warning("Could not consolidate memory for %s.", sender,
+                    exc_info=True)
     return outcome
 
 

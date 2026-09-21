@@ -113,6 +113,14 @@ Reminders don't consume the outbound daily budget. That budget exists to
 stop Indi from deciding on its own to write to people; a reminder was
 asked for.
 
+THE NEWSLETTER
+--------------
+A fourth thing a heartbeat can be for, and the only one that takes the
+choice away from the model: if the day's newsletter issue is owed, that
+run's job is to write and send it, and nothing else is offered. The
+mechanism, the storage and the reasons live in newsletter.py; all this
+file does is ask, first thing, whether today's issue is outstanding.
+
 Storage deliberately reuses SheetStore's generic tab primitives rather
 than adding schema to sheets_queue.py, so this feature is one file.
 
@@ -133,6 +141,7 @@ import uuid
 
 import costs
 import gmail_io
+import newsletter
 import sheets_queue
 import terms_gate
 
@@ -1224,6 +1233,27 @@ def run_heartbeat(client, cfg, gmail, store, system_prompt: str,
         log.error("Reminder delivery failed", exc_info=True)
         reminder_outcomes = ["reminder delivery raised an error (see log)"]
     prefix = ("; ".join(reminder_outcomes) + "; ") if reminder_outcomes else ""
+
+    # The newsletter, before the budgets below and before the model is
+    # offered the ordinary menu. A day's issue is owed to people who
+    # asked for it, so — like a reminder — it is neither stopped by the
+    # self-initiative budget nor counted against it; see newsletter.py
+    # for the limits it has instead. When an issue is already recorded
+    # for today, nothing here runs and the heartbeat proceeds exactly as
+    # it did before this existed.
+    try:
+        owed, why = newsletter.due(cfg, store, people)
+        if owed:
+            log.info("Newsletter: %s", why)
+            return prefix + newsletter.run_issue(
+                client, cfg, gmail, store, system_prompt,
+                heartbeat_model(cfg), people, context=_context(cfg, store),
+            )
+        log.debug("No newsletter this run: %s", why)
+    except Exception:
+        # A broken newsletter must not cost the heartbeat its ordinary
+        # run — the reply-adjacent work below is the part people notice.
+        log.error("The newsletter check failed", exc_info=True)
 
     sent_today = store.outbound_today()
     journal_today = store.journal_today()

@@ -49,6 +49,12 @@ they mattered:
    terms and nothing else. This sits between the guards above and every
    other thing this file does, because it decides whether there is
    anything to do.
+
+9. **Unsubscribing is code, not judgement.** Just after the gate, a
+   message from a newsletter subscriber that says nothing but
+   "unsubscribe" takes them off the list and is acknowledged with a
+   fixed reply, without the reply model being asked anything. See
+   `newsletter.py`.
 """
 
 from __future__ import annotations
@@ -75,6 +81,7 @@ import gmail_io
 import local_tools
 import locking
 import memory_file
+import newsletter
 import outbound
 import self_code
 import sheets_queue
@@ -424,6 +431,26 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
         return f"terms gate: {gate.outcome}"
     if gate.outcome != "terms accepted":
         log.info("Terms gate: %s", gate.outcome)
+
+    # --- unsubscribing from the newsletter -------------------------------
+    # After the terms gate, deliberately: the gate is not something a
+    # feature gets to step around, and nobody who has not passed it is
+    # receiving the newsletter in the first place. Before the model,
+    # equally deliberately — "unsubscribe" is an instruction with one
+    # correct response, and it is handled by code that cannot decide to
+    # do something else. Anyone who is not currently subscribed gets
+    # None back and falls through to an ordinary reply.
+    unsubscribed = newsletter.check_unsubscribe(cfg, gmail, store, msg)
+    if unsubscribed:
+        log.info("Newsletter: %s", unsubscribed)
+        if cfg.dry_run:
+            return f"would unsubscribe ({unsubscribed})"
+        if existing:
+            store.set_status(existing, sheets_queue.STATUS_SKIPPED, unsubscribed)
+        else:
+            store.append_queue_row(msg, sheets_queue.STATUS_SKIPPED, unsubscribed)
+        mark_as_read(gmail, msg["gmail_msg_id"])
+        return f"newsletter: {unsubscribed}"
 
     trusted = cfg.is_trusted(sender)
     scope_all_history = cfg.may_search_all_history(sender)

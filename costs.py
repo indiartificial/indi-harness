@@ -126,6 +126,31 @@ def record(kind: str, model: str, tokens: dict[str, int],
     return usd
 
 
+def record_usd(kind: str, model: str, usd: float, note: str = "") -> float:
+    """Record a cost that arrives already priced in dollars.
+
+    `record` above turns token counts into an estimate. Some things bill
+    us a figure directly instead — a Claude Code session reports its own
+    `total_cost_usd` and never tells us its tokens — and those belong in
+    the same ledger. The token columns are zero for these rows, which is
+    honest: we genuinely don't know them, and writing a guess in would
+    corrupt the per-token totals that `run_summary` reports.
+    """
+    _run.append({
+        "at": _now_iso(),
+        "kind": kind,
+        "model": model,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "web_searches": 0,
+        "usd": round(float(usd), 6),
+        "note": note[:200],
+    })
+    return float(usd)
+
+
 def run_rows() -> list[dict]:
     return list(_run)
 

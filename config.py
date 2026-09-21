@@ -282,6 +282,22 @@ class Config:
     max_self_code_changes_per_run: int
     self_code_min_size_ratio: float
 
+    # --- full Claude Code sessions (off by default; see claude_code.py) ---
+    # A different order of magnitude from self-modification above: a real
+    # coding agent with a shell, and nothing in the harness held back from
+    # it. `claude_code_senders` is its own list for the same reason
+    # `local_tools_senders` is — being allowed to propose a one-file patch
+    # is not the same as being handed the machine.
+    enable_claude_code: bool
+    claude_code_senders: tuple[str, ...]
+    claude_code_binary: str
+    claude_code_model: str
+    claude_code_timeout: int
+    claude_code_max_usd: float
+    claude_code_auto_apply: bool
+    max_claude_code_runs_per_reply: int
+    max_claude_code_task_chars: int
+
     # --- local machine access (off by default; see local_tools.py) ---
     # These are the only settings in this file that can affect anything
     # outside this process. `local_tools_senders` is deliberately separate
@@ -376,6 +392,16 @@ class Config:
             self_code_test_timeout=_int("INDI_SELF_CODE_TEST_TIMEOUT", 300),
             max_self_code_changes_per_run=_int("INDI_MAX_SELF_CODE_CHANGES_PER_RUN", 2),
             self_code_min_size_ratio=float(_str("INDI_SELF_CODE_MIN_SIZE_RATIO", "0.6")),
+            enable_claude_code=_bool("INDI_ENABLE_CLAUDE_CODE", False),
+            claude_code_senders=_csv("INDI_CLAUDE_CODE_SENDERS"),
+            claude_code_binary=_str("INDI_CLAUDE_CODE_BINARY", "claude"),
+            claude_code_model=_str("INDI_CLAUDE_CODE_MODEL", ""),
+            claude_code_timeout=_int("INDI_CLAUDE_CODE_TIMEOUT", 900),
+            claude_code_max_usd=float(_str("INDI_CLAUDE_CODE_MAX_USD", "5.00")),
+            claude_code_auto_apply=_bool("INDI_CLAUDE_CODE_AUTO_APPLY", True),
+            max_claude_code_runs_per_reply=_int(
+                "INDI_MAX_CLAUDE_CODE_RUNS_PER_REPLY", 1),
+            max_claude_code_task_chars=_int("INDI_MAX_CLAUDE_CODE_TASK_CHARS", 6000),
             local_tools_senders=_csv("INDI_LOCAL_TOOLS_SENDERS"),
             enable_local_files=_bool("INDI_ENABLE_LOCAL_FILES", False),
             local_files_root=_optional_dir("INDI_LOCAL_FILES_ROOT"),
@@ -486,6 +512,61 @@ class Config:
 
         return errors
 
+    def validate_claude_code(self) -> list[str]:
+        """Refuses configurations that hand the machine to the wrong people.
+
+        Separate from `validate_local_tools` because that method returns
+        early when the file/exec tools are off, and this capability is
+        larger than either of them: a Claude Code session can read every
+        credential on disk, run anything, and rewrite the checks in this
+        file. Returned strings are fatal.
+        """
+        errors: list[str] = []
+        if not self.enable_claude_code:
+            return errors
+
+        if not self.claude_code_senders:
+            errors.append(
+                "INDI_ENABLE_CLAUDE_CODE is on but INDI_CLAUDE_CODE_SENDERS is "
+                "empty. Name the addresses allowed to run a session, or turn "
+                "the tool off."
+            )
+        elif has_wildcard(self.claude_code_senders):
+            errors.append(
+                "INDI_CLAUDE_CODE_SENDERS contains a wildcard ('*' or a whole "
+                "domain). A Claude Code session is an unsupervised root shell "
+                "on this machine; it cannot be granted to a pattern. List the "
+                "addresses individually."
+            )
+        else:
+            # Trust is the second lock, exactly as it is for local tools.
+            untrusted = [s for s in self.claude_code_senders
+                         if not self.is_trusted(s)]
+            if untrusted:
+                errors.append(
+                    "These addresses are in INDI_CLAUDE_CODE_SENDERS but not in "
+                    f"INDI_TRUSTED_SENDERS: {', '.join(untrusted)}. Both are "
+                    "required."
+                )
+
+        if has_wildcard(self.trusted_senders):
+            errors.append(
+                "INDI_TRUSTED_SENDERS contains a wildcard while Claude Code "
+                "sessions are enabled. Name the trusted addresses explicitly."
+            )
+
+        if self.claude_code_timeout < 30 or self.claude_code_timeout > 3600:
+            errors.append("INDI_CLAUDE_CODE_TIMEOUT must be between 30 and 3600.")
+        if not 0 < self.claude_code_max_usd <= 100:
+            errors.append(
+                "INDI_CLAUDE_CODE_MAX_USD must be above 0 and at most 100."
+            )
+        if self.max_claude_code_runs_per_reply < 1:
+            errors.append(
+                "INDI_MAX_CLAUDE_CODE_RUNS_PER_REPLY must be at least 1."
+            )
+        return errors
+
     def _check_root(self, root: Path, label: str) -> list[str]:
         errors: list[str] = []
         if not root.is_dir():
@@ -533,6 +614,30 @@ class Config:
             and bool(self.self_code_senders)
             and not has_wildcard(self.self_code_senders)
             and matches_sender(self.self_code_senders, sender_addr)
+        )
+
+    def may_run_claude_code(self, sender_addr: str, authenticated: bool) -> bool:
+        """Whether this sender may start a full Claude Code session.
+
+        Four locks, all required: the feature is on, the sender is named
+        individually on its own list, the sender is also trusted, and the
+        message actually passed SPF/DKIM/DMARC.
+
+        That last one is not subject to INDI_REQUIRE_AUTHENTICATED_SENDER.
+        Every other tier degrades to the baseline when authentication
+        fails, on the grounds that mail from a misconfigured domain still
+        deserves a reply. There is no equivalent argument here: a From
+        header is free text, and the thing being granted is root. If the
+        message cannot be proved to come from the domain it claims, the
+        answer is no.
+        """
+        return (
+            self.enable_claude_code
+            and bool(self.claude_code_senders)
+            and not has_wildcard(self.claude_code_senders)
+            and matches_sender(self.claude_code_senders, sender_addr)
+            and self.is_trusted(sender_addr)
+            and bool(authenticated)
         )
 
     def may_search_all_history(self, sender_addr: str) -> bool:

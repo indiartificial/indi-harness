@@ -11,6 +11,11 @@ WorkingDirectory=/home/indi/harness
 ExecStart=/home/indi/venv/bin/python /home/indi/harness/check_and_reply.py --non-interactive
 TimeoutStartSec=900
 
+# systemd's default PATH has no ~/.local/bin and no venv, so neither the
+# Claude Code CLI nor pytest is findable without this. claude_code.py
+# compensates for its own case, but an explicit PATH is the honest fix.
+Environment=PATH=/home/indi/.local/bin:/home/indi/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
 # The harness needs its own directory and the docker socket; nothing else.
 NoNewPrivileges=true
 PrivateTmp=true

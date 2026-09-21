@@ -27,6 +27,17 @@ being gated can rewrite is not a gate.
 
 So this file, the guard files, and the tests are changed by Steve. Roughly
 everything else, Indi can change by itself.
+
+ONE EXCEPTION, ADDED LATER
+--------------------------
+`claude_code.py` exists and does not honour any of the above. Steve asked
+for a second path — a full Claude Code session over this directory, with
+a shell and no permission checks — and a session started that way can
+edit the guard files, the tests and this module. The protections
+described here still bound `propose_code_change`, which is what most
+edits go through, but they are no longer a property of the harness as a
+whole. The only check on the larger path is its sender list, and it is
+documented in that file.
 """
 
 from __future__ import annotations

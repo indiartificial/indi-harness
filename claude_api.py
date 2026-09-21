@@ -332,7 +332,7 @@ def build_attachment_blocks(gmail, cfg, msg: dict, client, trusted: bool):
 
 def build_tools(cfg, trusted: bool, have_store: bool,
                 local_runner=None, scope_all_history: bool = False,
-                self_code_runner=None,
+                self_code_runner=None, claude_code_runner=None,
                 reminder_sender: str = "") -> tuple[list[dict], list[str]]:
     """Returns (tools, betas). Trust gates the dangerous ones."""
     tools: list[dict] = []
@@ -389,6 +389,12 @@ def build_tools(cfg, trusted: bool, have_store: bool,
 
     if self_code_runner is not None:
         tools.extend(self_code_runner.schemas())
+
+    # A full Claude Code session over the harness. Same as above: the
+    # permission check happened in check_and_reply.py, and a runner
+    # existing at all means the sender cleared it.
+    if claude_code_runner is not None:
+        tools.extend(claude_code_runner.schemas())
 
     betas = cfg.betas(want_web_fetch=want_fetch, want_code_execution=want_code,
                       want_files=False)
@@ -546,12 +552,13 @@ def generate_reply(client, cfg, system_prompt: str, msg: dict,
                    store=None, trusted: bool = False,
                    attachment_blocks=None, local_runner=None,
                    scope_all_history: bool = False,
-                   self_code_runner=None,
+                   self_code_runner=None, claude_code_runner=None,
                    thread_text: str = "", quoted_text: str = "") -> tuple[str, dict]:
     """Returns (reply_text, stats). stats["set_aside"] is set to the stated
     reason if Indi chose not to reply at all."""
     tools, betas = build_tools(cfg, trusted, store is not None, local_runner,
                                scope_all_history, self_code_runner,
+                               claude_code_runner,
                                reminder_sender=msg["from_addr"])
 
     system_blocks = [{
@@ -637,7 +644,8 @@ def generate_reply(client, cfg, system_prompt: str, msg: dict,
     stream = client.beta.messages.stream if betas else client.messages.stream
 
     stats = {"server_tools": 0, "history_searches": 0, "local_tools": 0,
-             "self_code": 0, "cost_ledger": 0, "reminders": 0, "set_aside": None,
+             "self_code": 0, "claude_code": 0, "cost_ledger": 0,
+             "reminders": 0, "set_aside": None,
              "cache_read": 0, "cache_created": 0, "iterations": 0,
              # Every billable token this message consumes, summed across
              # the tool loop. Priced by the caller, which knows the model.
@@ -716,6 +724,15 @@ def generate_reply(client, cfg, system_prompt: str, msg: dict,
             elif self_code_runner is not None and call.name in self_code_runner.tool_names:
                 stats["self_code"] += 1
                 text, is_error = self_code_runner.handle(call.name, call.input)
+                if not is_error:
+                    text = f"{UNTRUSTED_OPEN}\n{text}\n{UNTRUSTED_CLOSE}"
+            elif (claude_code_runner is not None
+                  and call.name in claude_code_runner.tool_names):
+                stats["claude_code"] += 1
+                text, is_error = claude_code_runner.handle(call.name, call.input)
+                # The session's own final message is inside this text, and
+                # it read whatever files the task led it to. Same rule as
+                # every other tool that can surface content from disk.
                 if not is_error:
                     text = f"{UNTRUSTED_OPEN}\n{text}\n{UNTRUSTED_CLOSE}"
             elif local_runner is not None and call.name in local_runner.tool_names:

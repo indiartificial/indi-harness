@@ -60,6 +60,7 @@ from googleapiclient.discovery import build
 import anthropic
 
 import claude_api
+import claude_code
 import costs
 import gmail_io
 import local_tools
@@ -68,7 +69,7 @@ import memory_file
 import outbound
 import self_code
 import sheets_queue
-from config import Config
+from config import Config, matches_sender
 
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.modify",
@@ -394,8 +395,13 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
     # honouring any tier above the baseline; on failure, drop to baseline
     # rather than refusing, so ordinary mail from misconfigured domains
     # still gets a reply.
+    #
+    # Checked once, unconditionally, because two different things need the
+    # answer: the tier downgrade just below, which Steve can switch off
+    # with INDI_REQUIRE_AUTHENTICATED_SENDER, and the Claude Code gate
+    # further down, which he cannot.
+    authentic, why = gmail_io.sender_is_authenticated(msg)
     if cfg.require_authenticated_sender and (trusted or scope_all_history):
-        authentic, why = gmail_io.sender_is_authenticated(msg)
         if not authentic:
             log.warning(
                 "Sender %s claims a privileged tier but failed authentication "
@@ -444,6 +450,24 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
         if self_code_runner.can_modify:
             log.warning("SELF-MODIFICATION enabled for %s (auto-apply=%s)",
                         sender, cfg.self_code_auto_apply)
+
+    # The unrestricted one. Nothing in the harness is held back from a
+    # session started here — including this check. See claude_code.py.
+    claude_code_runner = None
+    if cfg.may_run_claude_code(sender, authentic):
+        claude_code_runner = claude_code.ClaudeCodeRunner(cfg)
+        log.warning(
+            "CLAUDE CODE ENABLED for %s — unrestricted access to the harness, "
+            "auto-apply=%s, ceiling $%.2f per session, %d per reply.",
+            sender, cfg.claude_code_auto_apply, cfg.claude_code_max_usd,
+            cfg.max_claude_code_runs_per_reply,
+        )
+    elif (cfg.enable_claude_code and not authentic
+          and matches_sender(cfg.claude_code_senders, sender)):
+        log.warning(
+            "Sender %s is on INDI_CLAUDE_CODE_SENDERS but the message failed "
+            "authentication (%s) — no Claude Code session.", sender, why,
+        )
 
     # --- context --------------------------------------------------------
     memory = memory_file.SenderMemory(drive, sender)
@@ -513,6 +537,7 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
             attachment_blocks=attachment_blocks,
             local_runner=local_runner,
             self_code_runner=self_code_runner,
+            claude_code_runner=claude_code_runner,
             thread_text=thread_text,
             quoted_text=quoted_text,
         )
@@ -545,6 +570,10 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
     if stats.get("self_code"):
         log.warning("Claude used the self-modification tools %d time(s).",
                     stats["self_code"])
+
+    if stats.get("claude_code"):
+        log.warning("Claude Code ran %d session(s) over the harness.",
+                    stats["claude_code"])
 
     if stats.get("set_aside"):
         reason = stats["set_aside"]
@@ -679,12 +708,22 @@ def main() -> int:
             log.info("DRY RUN — no mail sent, no sheets or memory written.")
         if cfg.send_automatically and not cfg.dry_run:
             log.warning("INDI_SEND_AUTOMATICALLY is on: replies go out without review.")
-        problems = cfg.validate_local_tools()
+        problems = cfg.validate_local_tools() + cfg.validate_claude_code()
         if problems:
             for problem in problems:
                 log.error("%s", problem)
             raise SystemExit(
                 "Refusing to start with an unsafe local-tools configuration."
+            )
+        if cfg.enable_claude_code:
+            log.warning(
+                "CLAUDE CODE SESSIONS ARE ON for %s. These senders can have "
+                "Indi run an unrestricted coding agent over this harness — "
+                "every file, including the credentials, the permission checks "
+                "and the test suite. Authentication is mandatory for them and "
+                "each session is capped at $%.2f and %ss.",
+                ", ".join(cfg.claude_code_senders), cfg.claude_code_max_usd,
+                cfg.claude_code_timeout,
             )
         if cfg.enable_local_files or cfg.enable_local_exec:
             log.warning(

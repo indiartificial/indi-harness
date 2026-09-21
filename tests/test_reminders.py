@@ -29,10 +29,26 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import pytest
 
 import claude_api
+import correspondents
 import outbound
 
 
 UTC = datetime.timezone.utc
+
+
+@pytest.fixture(autouse=True)
+def accepted_recipients(tmp_path, monkeypatch):
+    """Reminder delivery now runs through the terms gate, and a reminder
+    to someone who has not accepted is held rather than sent. These tests
+    are about the delivery mechanics, so they start from a correspondent
+    database in which the recipient they use has accepted. The gate's own
+    behaviour — including a held reminder — is tested in
+    tests/test_terms_gate.py."""
+    db = tmp_path / "correspondents.db"
+    monkeypatch.setenv("INDI_CORRESPONDENTS_DB", str(db))
+    people = correspondents.CorrespondentStore(db)
+    people.record_acceptance("steve@example.com", "0.2")
+    people.close()
 
 
 def _now():

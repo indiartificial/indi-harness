@@ -113,6 +113,12 @@ class SheetStore:
         self.queue_id: str | None = None
         self.responses_id: str | None = None
         self._cache: dict[str, list[dict]] = {}
+        # The header row each tab actually had when it was read, kept
+        # alongside the parsed rows. `_load` throws the order away by
+        # turning rows into dicts, and an exporter needs the columns in
+        # the order and spelling the sheet holds them, not the order this
+        # module happens to declare.
+        self._headers: dict[str, list[str]] = {}
 
     # -- spreadsheet lookup / creation ------------------------------------
 
@@ -236,6 +242,7 @@ class SheetStore:
             .get("values", [])
         )
         rows: list[dict] = []
+        headers: list[str] = []
         if values:
             headers = values[0]
             for offset, row in enumerate(values[1:], start=2):
@@ -246,8 +253,22 @@ class SheetStore:
                 record["_row"] = offset
                 rows.append(record)
         self._cache[key] = rows
+        self._headers[key] = list(headers)
         log.debug("Loaded %d rows from %s", len(rows), tab)
         return rows
+
+    def tab_headers(self, spreadsheet_id: str, tab: str) -> list[str]:
+        """The header row of a tab, as the sheet spells it.
+
+        Loads the tab if it hasn't been read yet, so this costs nothing
+        extra when the rows are wanted too. An empty list means the tab
+        is empty or was never reachable — callers decide what to fall
+        back to rather than getting a guess from here.
+        """
+        key = f"{spreadsheet_id}:{tab}"
+        if key not in self._headers:
+            self._load(spreadsheet_id, tab)
+        return list(self._headers.get(key) or [])
 
     def queue_rows(self) -> list[dict]:
         return self._load(self.queue_id, QUEUE_TAB)
@@ -568,6 +589,32 @@ def _cost_methods():
     def cost_rows(self) -> list[dict]:
         return self._load(self.responses_id, COSTS_TAB)
 
+    def cost_table(self) -> tuple[list[str], list[dict]]:
+        """The Costs tab as (header row, data rows), for exporting verbatim.
+
+        `cost_rows` is all an aggregate needs, but handing the ledger back
+        as a file means reproducing the sheet's own header line: a
+        deployment whose tab gained a column through `_ensure_headers`
+        should export that column, under the name the sheet gives it and
+        in the position the sheet puts it. The declared COSTS_HEADERS are
+        only the fallback for a tab we could read rows from but no header.
+
+        This one degrades instead of raising. It is called from the reply
+        path, where an unreachable Sheets API or a missing tab would
+        otherwise turn a question about bookkeeping into a failed reply;
+        an empty result says "nothing to export" and the caller says so.
+        """
+        try:
+            rows = self.cost_rows()
+            headers = self.tab_headers(self.responses_id, COSTS_TAB)
+        except Exception:
+            log.warning("Could not read the %s tab for export.", COSTS_TAB,
+                        exc_info=True)
+            return [], []
+        if not headers:
+            headers = list(COSTS_HEADERS) if rows else []
+        return headers, rows
+
     def append_costs(self, rows: list[dict]) -> None:
         """Write a run's priced calls. One append per row — a run makes a
         handful of calls at most, and batching them would mean holding the
@@ -597,7 +644,7 @@ def _cost_methods():
                 continue
         return round(total, 6), calls
 
-    for fn in (cost_rows, append_costs, spend_since):
+    for fn in (cost_rows, cost_table, append_costs, spend_since):
         setattr(SheetStore, fn.__name__, fn)
 
 

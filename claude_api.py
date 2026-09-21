@@ -31,6 +31,10 @@ Fixes over the previous version:
     guesswork. Trusted senders only, aggregates by default, and the
     `note` column — which carries correspondents' addresses — is included
     only for senders who already have cross-sender history scope.
+    `export_cost_ledger_csv` hands the same rows back verbatim as CSV,
+    for the owner who wants the individual calls by email rather than by
+    opening the spreadsheet; it is offered to exactly the same senders,
+    under the same note-column rule.
 
   * **Empty replies are caught.** If the tool loop runs out of iterations
     while Claude is still calling a tool, the final response can contain
@@ -53,6 +57,7 @@ Fixes over the previous version:
 from __future__ import annotations
 
 import base64
+import csv
 import datetime
 import io
 import logging
@@ -69,11 +74,23 @@ log = logging.getLogger("indi.claude")
 HISTORY_SEARCH_TOOL_NAME = "search_message_history"
 SET_ASIDE_TOOL_NAME = "set_aside_without_replying"
 COST_LEDGER_TOOL_NAME = "read_cost_ledger"
+COST_LEDGER_CSV_TOOL_NAME = "export_cost_ledger_csv"
 
 # A ledger query can't be allowed to ask for an unbounded window of a
 # sheet that grows forever; three months is well past anything useful.
 MAX_LEDGER_HOURS = 24 * 90
 DEFAULT_LEDGER_HOURS = 24
+
+# The CSV export pays for every row twice — once as tool-result tokens on
+# the way into the context, once again in whatever Claude writes out of
+# it — so it is bounded twice over. The row cap is what the model may ask
+# for; the character cap is the one that actually binds, because a window
+# wide enough to matter will hit it first. ~80k characters is on the
+# order of 20k tokens, which is a real but defensible price for an export
+# somebody explicitly asked for.
+DEFAULT_LEDGER_CSV_ROWS = 2000
+MAX_LEDGER_CSV_ROWS = 5000
+MAX_LEDGER_CSV_CHARS = 80_000
 
 SET_ASIDE_SCHEMA = {
     "name": SET_ASIDE_TOOL_NAME,
@@ -197,6 +214,65 @@ def cost_ledger_schema(include_notes: bool) -> dict:
                     "description": (
                         f"How far back to look, in hours. Defaults to "
                         f"{DEFAULT_LEDGER_HOURS}; capped at {MAX_LEDGER_HOURS}."
+                    ),
+                },
+            },
+        },
+    }
+
+
+def cost_ledger_csv_schema(include_notes: bool) -> dict:
+    """The raw-rows counterpart to `cost_ledger_schema`.
+
+    The description spends most of its words on when *not* to call this,
+    because the failure mode is the model reaching for the row dump when
+    a total was the question — which costs a page of context to answer
+    something `read_cost_ledger` answers in six lines.
+    """
+    note_note = (
+        " The note column names the correspondent each reply was for, so "
+        "these rows carry other people's email addresses: they go to the "
+        "person who asked for their own ledger and nowhere else."
+        if include_notes else
+        " The note column, which names other correspondents, is left out of "
+        "the export."
+    )
+    return {
+        "name": COST_LEDGER_CSV_TOOL_NAME,
+        "description": (
+            "Export the raw rows of Indi's own Anthropic API spend ledger as "
+            "CSV — one line per Claude call, oldest first, under the "
+            "spreadsheet's real header row. Use it when someone wants the "
+            "individual calls rather than a summary: to check one particular "
+            "call, to do their own arithmetic on the numbers, or to be sent "
+            "the ledger by email instead of having to open Google Sheets. The "
+            "natural thing to do with the result is to put it in an "
+            "[ATTACHMENT: costs.csv] block, unedited. For 'what has this been "
+            f"costing?', 'where does the money go?' or any other question "
+            f"answerable by a total, call {COST_LEDGER_TOOL_NAME} instead — it "
+            "reads the same rows and gives back totals by model, by kind and "
+            "by correspondent at a fraction of the size. The figures are "
+            "estimates computed from token counts against a hardcoded rate "
+            "card, not the invoice, and a call whose model has no rate on "
+            "file has an empty usd cell." + note_note
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "hours": {
+                    "type": "integer",
+                    "description": (
+                        f"How far back to look, in hours. Defaults to "
+                        f"{DEFAULT_LEDGER_HOURS}; capped at {MAX_LEDGER_HOURS}."
+                    ),
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": (
+                        f"How many rows at most, most recent kept. Defaults to "
+                        f"{DEFAULT_LEDGER_CSV_ROWS}; capped at "
+                        f"{MAX_LEDGER_CSV_ROWS}. A large export may still be "
+                        "truncated to fit, which the preamble will say."
                     ),
                 },
             },
@@ -421,9 +497,13 @@ def build_tools(cfg, trusted: bool, have_store: bool,
 
     # The spend ledger. Read-only, and restricted to trusted senders: what
     # the account costs is Steve's business, not a stranger's, and the
-    # rows' notes name other correspondents.
+    # rows' notes name other correspondents. The CSV export is the same
+    # data by another shape, so it rides on exactly the same condition and
+    # the same note-column rule — anything else would mean one of the two
+    # tools handing out what the other withholds.
     if have_store and trusted:
         tools.append(cost_ledger_schema(include_notes=scope_all_history))
+        tools.append(cost_ledger_csv_schema(include_notes=scope_all_history))
 
     # Local filesystem / local execution. The runner decides what it
     # offers; by the time we get here the permission check has already
@@ -591,6 +671,142 @@ def _run_cost_ledger(store, tool_input: dict, include_notes: bool) -> str:
     return f"{UNTRUSTED_OPEN}\n" + "\n".join(lines) + f"\n{UNTRUSTED_CLOSE}"
 
 
+def _ledger_csv_limit(tool_input: dict) -> int:
+    try:
+        limit = int(tool_input.get("limit") or DEFAULT_LEDGER_CSV_ROWS)
+    except (TypeError, ValueError):
+        limit = DEFAULT_LEDGER_CSV_ROWS
+    return max(1, min(limit, MAX_LEDGER_CSV_ROWS))
+
+
+def _csv_line(values) -> str:
+    """One CSV record, quoted by the stdlib rather than by hand.
+
+    Ledger cells are mostly numbers, but `note` is free text holding an
+    address or a reason, and a comma or a quote in there has to survive
+    the round trip into someone's spreadsheet. Built a line at a time so
+    the size cap below can count characters against real output.
+    """
+    buffer = io.StringIO()
+    csv.writer(buffer, lineterminator="\n").writerow(
+        ["" if v is None else str(v) for v in values]
+    )
+    return buffer.getvalue()
+
+
+def _run_cost_ledger_csv(store, tool_input: dict, include_notes: bool) -> str:
+    """Hand back the ledger rows themselves, as CSV.
+
+    The counterpart to `_run_cost_ledger`, and deliberately the rarer of
+    the two: this is for the question a total can't answer — which call
+    was that, what did the third heartbeat this morning actually cost —
+    and for getting the ledger out of the spreadsheet and into an email.
+
+    Two bounds, both of which announce themselves in the preamble rather
+    than quietly dropping rows: `limit` on the row count, and a character
+    cap on the CSV, each of which keeps the newest rows and discards from
+    the old end. A silently short export is worse than a loud one,
+    because the recipient has no way to tell it was short.
+
+    The preamble sits outside the untrusted markers and the rows sit
+    inside them: the sentences are this script's own and Claude should
+    believe them, while the rows are a file's contents like any other —
+    and keeping the markers off the CSV means they don't end up pasted
+    into the attachment.
+    """
+    hours = _ledger_hours(tool_input)
+    limit = _ledger_csv_limit(tool_input)
+    try:
+        headers, rows = store.cost_table()
+    except Exception as exc:
+        log.warning("Could not read the cost ledger: %s", exc)
+        return f"Could not read the cost ledger: {exc}"
+
+    if not headers:
+        return ("The cost ledger has no rows to export — the Costs tab is "
+                "empty or could not be read.")
+
+    # `_row` is bookkeeping this module added, not a ledger column, and
+    # the note column follows the same rule it does in the aggregate: it
+    # is only there for senders with cross-correspondent scope.
+    columns = [h for h in headers
+               if h != "_row" and (include_notes or h != "note")]
+
+    cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=hours)
+    dated: list[tuple[datetime.datetime, dict]] = []
+    undated = 0
+    for row in rows:
+        when = _parse_ledger_time(row.get("at", ""))
+        if when is None:
+            undated += 1
+            continue
+        if when >= cutoff:
+            dated.append((when, row))
+
+    if not dated:
+        return (
+            f"The cost ledger has no rows in the last {hours}h "
+            f"({len(rows)} row(s) on file in total)."
+        )
+
+    # Oldest first, which is how the sheet itself reads and how a CSV is
+    # usually wanted; the truncations below therefore eat the top.
+    dated.sort(key=lambda pair: pair[0])
+    matched = len(dated)
+    selected = [row for _, row in dated[-limit:]]
+    dropped_by_limit = matched - len(selected)
+
+    header_line = _csv_line(columns)
+    body_lines = [_csv_line([row.get(c, "") for c in columns])
+                  for row in selected]
+
+    kept: list[str] = []
+    used = len(header_line)
+    for line in reversed(body_lines):
+        # `and kept` keeps one row even if a single row is somehow larger
+        # than the whole budget: an export of nothing would be a worse
+        # answer than an export slightly over the cap.
+        if used + len(line) > MAX_LEDGER_CSV_CHARS and kept:
+            break
+        used += len(line)
+        kept.append(line)
+    kept.reverse()
+    dropped_for_size = len(body_lines) - len(kept)
+
+    window_from = dated[matched - len(kept)][0] if kept else dated[-1][0]
+    preamble = [
+        f"{len(kept)} ledger row(s) as CSV, oldest first, covering "
+        f"{window_from.isoformat()} to now (asked for the last {hours}h).",
+        "Estimates computed from token counts against a hardcoded rate card "
+        "— not the invoice. A blank usd cell is a call whose model had no "
+        "rate on file, so it counts as a call but no dollars.",
+    ]
+    if dropped_by_limit:
+        preamble.append(
+            f"{dropped_by_limit} older row(s) in the window were left out to "
+            f"stay within the requested limit of {limit}."
+        )
+    if dropped_for_size:
+        preamble.append(
+            f"{dropped_for_size} further older row(s) were dropped because the "
+            f"CSV would not fit in {MAX_LEDGER_CSV_CHARS} characters. This "
+            "export is truncated — say so if you pass it on, and narrow the "
+            "window if the missing rows matter."
+        )
+    if undated:
+        preamble.append(f"{undated} ledger row(s) have an unreadable timestamp "
+                        "and are not in any window, so they are never exported.")
+    if not include_notes:
+        preamble.append("The note column is omitted from this export.")
+
+    return (
+        "\n".join(preamble)
+        + f"\n\n{UNTRUSTED_OPEN}\n"
+        + header_line + "".join(kept)
+        + UNTRUSTED_CLOSE
+    )
+
+
 def generate_reply(client, cfg, system_prompt: str, msg: dict,
                    memory_body: str = "", pending_text: str = "",
                    store=None, trusted: bool = False,
@@ -753,6 +969,18 @@ def generate_reply(client, cfg, system_prompt: str, msg: dict,
                 else:
                     stats["cost_ledger"] += 1
                     text, is_error = _run_cost_ledger(
+                        store, call.input, include_notes=scope_all_history
+                    ), False
+            elif call.name == COST_LEDGER_CSV_TOOL_NAME:
+                # The same guard as the aggregate above, repeated rather
+                # than shared: the two tools must be refused on identical
+                # terms, and the check that enforces that is the one
+                # standing next to the call it protects.
+                if store is None or not trusted:
+                    text, is_error = "The cost ledger is not available.", True
+                else:
+                    stats["cost_ledger"] += 1
+                    text, is_error = _run_cost_ledger_csv(
                         store, call.input, include_notes=scope_all_history
                     ), False
             elif call.name in attachments.TOOL_NAMES:

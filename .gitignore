@@ -10,3 +10,6 @@ api_key.txt
 
 # Who has accepted the terms. Personal data, and machine-local.
 data/correspondents.db
+
+# Correspondents' files, both directions. Personal data, and machine-local.
+data/attachments/

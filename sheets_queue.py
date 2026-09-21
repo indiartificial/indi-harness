@@ -42,9 +42,14 @@ log = logging.getLogger("indi.sheets")
 
 QUEUE_TITLE = "Indi Queue"
 QUEUE_TAB = "Queue"
+# `attachments` is last on purpose. `_ensure_headers` upgrades an existing
+# sheet by appending whatever columns it is missing, so a new column at the
+# end is the only kind that leaves every existing row's values where they
+# are — and `set_status` writes the status..note range by index, which
+# stays contiguous only while nothing is inserted before it.
 QUEUE_HEADERS = [
     "gmail_msg_id", "thread_id", "sender", "sender_addr", "subject",
-    "body", "received_at", "status", "note",
+    "body", "received_at", "status", "note", "attachments",
 ]
 
 RESPONSES_TITLE = "Indi Responses"
@@ -305,6 +310,10 @@ class SheetStore:
             "received_at": _received_at_iso(msg),
             "status": status,
             "note": note[:500],
+            # Filled in by set_attachments once the files are on disk:
+            # incoming ones are stored after the row exists, and outgoing
+            # ones only exist after the reply has gone out.
+            "attachments": "",
         }
         row_number = self._append(self.queue_id, QUEUE_TAB, QUEUE_HEADERS, record)
         record["_row"] = row_number
@@ -326,6 +335,30 @@ class SheetStore:
             range=f"{QUEUE_TAB}!{status_col}{row_number}:{note_col}{row_number}",
             valueInputOption="RAW",
             body={"values": [[status, (note or queue_row.get("note", ""))[:500]]]},
+        ).execute()
+
+    def set_attachments(self, queue_row: dict, paths: list[str]) -> None:
+        """Record which stored attachments belong to this message.
+
+        Rows written before this column existed simply have no value in
+        it; `_load` pads short rows, so reading one back gives "" rather
+        than a KeyError, and nothing else in the harness reads the column
+        at all. The value is a comma-separated list of store paths, which
+        is what `read_stored_attachment` takes.
+        """
+        value = ", ".join(paths)[: self.cfg.max_body_chars]
+        queue_row["attachments"] = value
+        row_number = queue_row.get("_row", -1)
+        if row_number <= 0:
+            log.warning("No row number for %s; cannot record attachments",
+                        queue_row.get("gmail_msg_id"))
+            return
+        column = _col_letter(QUEUE_HEADERS.index("attachments"))
+        self.sheets.spreadsheets().values().update(
+            spreadsheetId=self.queue_id,
+            range=f"{QUEUE_TAB}!{column}{row_number}",
+            valueInputOption="RAW",
+            body={"values": [[value]]},
         ).execute()
 
     def append_response(self, gmail_msg_id: str, sender_addr: str, text: str) -> None:

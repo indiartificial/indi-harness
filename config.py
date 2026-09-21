@@ -256,6 +256,15 @@ class Config:
     upload_text_attachments: bool
     max_inline_attachment_chars: int
     max_outgoing_attachment_bytes: int
+    # Where attachments are kept once the run that carried them is over,
+    # and the two ceilings on that store. The caps are generous compared
+    # with what the reply path will look at — the point of the store is
+    # that the file is still there later, not that Indi can read all of
+    # it in one prompt.
+    attachments_dir: Path
+    store_attachments: bool
+    max_stored_attachment_mb: int
+    max_stored_attachments_per_message_mb: int
 
     # --- memory ---
     memory_batch_size: int
@@ -370,6 +379,11 @@ class Config:
             upload_text_attachments=_bool("INDI_UPLOAD_TEXT_ATTACHMENTS", False),
             max_inline_attachment_chars=_int("INDI_MAX_INLINE_ATTACHMENT_CHARS", 40000),
             max_outgoing_attachment_bytes=_int("INDI_MAX_OUTGOING_ATTACHMENT_BYTES", 1_000_000),
+            attachments_dir=_path("INDI_ATTACHMENTS_DIR", "data/attachments"),
+            store_attachments=_bool("INDI_STORE_ATTACHMENTS", True),
+            max_stored_attachment_mb=_int("INDI_MAX_STORED_ATTACHMENT_MB", 10),
+            max_stored_attachments_per_message_mb=_int(
+                "INDI_MAX_STORED_ATTACHMENTS_PER_MESSAGE_MB", 25),
             memory_batch_size=_int("INDI_MEMORY_BATCH_SIZE", 5),
             memory_max_tokens=_int("INDI_MEMORY_MAX_TOKENS", 4000),
             memory_keep_backup=_bool("INDI_MEMORY_KEEP_BACKUP", True),

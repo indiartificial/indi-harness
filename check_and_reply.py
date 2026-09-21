@@ -66,6 +66,7 @@ from googleapiclient.discovery import build
 
 import anthropic
 
+import attachments
 import claude_api
 import claude_code
 import correspondents
@@ -553,11 +554,16 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
         log.info("Quoted text below the message adds %d chars the thread "
                  "doesn't have.", len(quoted_text))
 
-    attachment_blocks, uploaded_ids = claude_api.build_attachment_blocks(
+    attachment_blocks, uploaded_ids, stored_paths = claude_api.build_attachment_blocks(
         gmail, cfg, msg, claude, trusted
     )
     if msg["attachment_refs"]:
         log.info("%d attachment(s) on this message.", len(msg["attachment_refs"]))
+    # Recorded on the queue row as soon as the files are down, rather than
+    # with the outgoing ones at the end: if this run dies before the reply
+    # goes out, the sheet should still say where the incoming files went.
+    if stored_paths and row:
+        store.set_attachments(row, stored_paths)
 
     # --- generate -------------------------------------------------------
     try:
@@ -582,6 +588,9 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
         log.info("Claude made %d server tool call(s).", stats["server_tools"])
     if stats["history_searches"]:
         log.info("Claude searched message history %d time(s).", stats["history_searches"])
+    if stats.get("attachments"):
+        log.info("Claude used the stored-attachment tools %d time(s).",
+                 stats["attachments"])
     if stats.get("local_tools"):
         log.warning("Claude made %d local tool call(s) on this machine.",
                     stats["local_tools"])
@@ -682,6 +691,21 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
     # Record the response only after the mail actually went somewhere, so
     # the sheets never claim a reply that doesn't exist.
     store.append_response(msg["gmail_msg_id"], sender, clean_body)
+
+    # The outgoing files, kept for the same reason the incoming ones are:
+    # "the document you sent me" is a question about a real file, and
+    # until now the only copy was in the recipient's mailbox. Stored after
+    # the send, so the store never holds something that never went out.
+    for name, content in safe_attachments:
+        rel = attachments.store_text(
+            cfg, msg["gmail_msg_id"], name, content, attachments.DIRECTION_OUT,
+            sender=sender, subject=msg["subject"],
+        )
+        if rel:
+            stored_paths.append(rel)
+    if stored_paths:
+        store.set_attachments(row, stored_paths)
+
     store.set_status(row, sheets_queue.STATUS_REPLIED, outcome)
     mark_as_read(gmail, msg["gmail_msg_id"])
     log.info("Reply %s.", outcome)

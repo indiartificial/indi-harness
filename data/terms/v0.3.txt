@@ -1,0 +1,186 @@
+TERMS OF SERVICE
+
+Between: Steven J. Halasz ("Operator")
+And: the individual using the service ("User", "you")
+
+Service: an experimental email correspondent operating as "Indi Artificial"
+at indiartificial@gmail.com (the "Service").
+
+By sending any message to the Service after receiving these Terms, you agree
+to them. If you do not agree, do not use the Service; reply "DECLINE" or stop
+writing, and your address will receive no further substantive replies.
+
+1. RECITALS AND REPRESENTATIONS
+
+1.1  You represent that you are at least 18 years of age and have the legal
+     capacity to enter into this agreement.
+
+1.2  You represent that you are located in, and will use the Service only
+     from within, the United States of America.
+
+1.3  You understand that the Service is an artificial intelligence system
+     built on large language models supplied by Anthropic PBC. It is not a
+     human being, is not supervised in real time, and its replies are
+     generated automatically and sent without human review.
+
+1.4  You understand that the Service can and does make mistakes. It may
+     state things that are inaccurate, incomplete, or entirely fabricated,
+     including about facts, law, medicine, finance, its own capabilities,
+     and prior conversations. Output must be independently verified before
+     being relied upon. The Service does not provide legal, medical,
+     financial, or other professional advice, and no professional
+     relationship of any kind is created by using it.
+
+1.5  The Service is provided for personal, non-commercial, experimental use.
+     It is not a crisis line, an emergency service, or a substitute for one.
+     In an emergency, contact 911 or an appropriate crisis service.
+
+2. ACCEPTABLE USE
+
+2.1  You will not use the Service in violation of any applicable federal,
+     state, or local law, or to facilitate any unlawful act.
+
+2.2  You will comply with Anthropic's Usage Policy as published from time to
+     time at anthropic.com, which governs the underlying models. Without
+     limiting that policy, you will not use the Service to generate content
+     that sexually exploits minors, to harass or threaten any person, to
+     create malware or facilitate intrusion into computer systems, to
+     produce weapons of mass destruction or their precursors, to impersonate
+     others for deceptive purposes, or to generate targeted disinformation.
+
+2.3  You will not attempt to obtain the Service's credentials, to induce it
+     to disable its safeguards, or to use it as a channel to transmit
+     information to third parties without disclosure.
+
+2.4  You will not submit information belonging to third parties that you are
+     not entitled to share, including personal, confidential, or
+     health-related information about other people.
+
+2.5  Operator may decline, limit, or terminate service to any address at any
+     time, for any reason or none, with or without notice.
+
+3. INFORMATION HANDLING
+
+3.1  The Service retains what you send it. Messages you send, attachments
+     you include, and replies the Service sends are stored in the operating
+     email account, in logs and databases on Operator's equipment, and in
+     memory files the Service maintains about correspondents. There is no
+     retention limit and no guaranteed deletion.
+
+3.2  Your messages are transmitted to and processed by Anthropic PBC as part
+     of generating replies, subject to Anthropic's own terms and policies,
+     over which Operator has no control.
+
+3.3  Operator and the Service may quote, publish, or otherwise disclose the
+     content of your communications: to Operator, to service providers, in
+     public or private writing about this project, in academic or technical
+     discussion of it, and where required by law or by the terms of the
+     underlying model provider. Operator's practice is to de-identify
+     correspondents in public material, but you should treat anything you
+     send as potentially disclosable and should not send anything you would
+     not want read by someone else.
+
+3.4  Do not send passwords, financial account numbers, government
+     identification numbers, health records, or other sensitive personal
+     information. If you do, you do so at your own risk.
+
+3.5  Email is not a secure medium. No assurance of confidentiality,
+     integrity, or availability is given.
+
+4. RELEASE FOR NAME, LIKENESS AND CONTENT
+
+4.1  You grant Operator a perpetual, irrevocable, worldwide, royalty-free,
+     non-exclusive licence to reproduce, adapt, publish, distribute and
+     display the content of your communications with the Service, in whole
+     or in part, in any medium now known or later devised, for any lawful
+     purpose.
+
+4.2  You further release Operator to use your name, email handle, likeness,
+     voice and any images or recordings you submit, for the same purposes.
+
+4.3  You waive any right to inspect or approve any use made under 4.1 or
+     4.2, and waive any claim for compensation, defamation, false light, or
+     invasion of privacy arising from such use, to the extent such waiver is
+     permitted by law.
+
+4.4  You retain ownership of your own content. This clause is a licence and
+     release, not an assignment.
+
+5. DISCLAIMER OF WARRANTIES
+
+5.1  THE SERVICE IS PROVIDED "AS IS" AND "AS AVAILABLE", WITH ALL FAULTS AND
+     WITHOUT WARRANTY OF ANY KIND. TO THE MAXIMUM EXTENT PERMITTED BY LAW,
+     OPERATOR DISCLAIMS ALL WARRANTIES, EXPRESS, IMPLIED AND STATUTORY,
+     INCLUDING WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+     PURPOSE, TITLE, NON-INFRINGEMENT, ACCURACY, AND ANY WARRANTY ARISING
+     FROM COURSE OF DEALING OR USAGE OF TRADE.
+
+5.2  Operator does not warrant that the Service will be available, timely,
+     uninterrupted, secure, error-free, or that any reply will be accurate
+     or suitable for any purpose. Replies may be delayed indefinitely or
+     never sent. Scheduled messages may fail to arrive.
+
+5.3  No advice or information obtained from the Service creates any warranty
+     not expressly stated here.
+
+6. LIMITATION OF LIABILITY
+
+6.1  TO THE MAXIMUM EXTENT PERMITTED BY LAW, OPERATOR WILL NOT BE LIABLE FOR
+     ANY INDIRECT, INCIDENTAL, SPECIAL, CONSEQUENTIAL, EXEMPLARY OR PUNITIVE
+     DAMAGES, OR FOR LOST PROFITS, LOST DATA, LOSS OF GOODWILL, OR BUSINESS
+     INTERRUPTION, ARISING FROM OR RELATING TO THE SERVICE, ON ANY THEORY OF
+     LIABILITY, EVEN IF ADVISED OF THE POSSIBILITY.
+
+6.2  OPERATOR'S TOTAL AGGREGATE LIABILITY ARISING FROM OR RELATING TO THE
+     SERVICE WILL NOT EXCEED ONE HUNDRED U.S. DOLLARS ($100.00) OR THE
+     AMOUNT YOU PAID OPERATOR IN THE TWELVE MONTHS PRECEDING THE CLAIM,
+     WHICHEVER IS GREATER.
+
+6.3  Some jurisdictions do not allow certain exclusions or limitations; in
+     those jurisdictions the exclusions and limitations above apply to the
+     fullest extent permitted, and nothing here excludes liability that
+     cannot lawfully be excluded, including for fraud or for death or
+     personal injury caused by negligence.
+
+7. INDEMNITY AND HOLD HARMLESS
+
+7.1  You will defend, indemnify and hold harmless Operator and his heirs,
+     successors and assigns from and against any and all claims, demands,
+     actions, losses, liabilities, damages, judgments, settlements, costs
+     and expenses (including reasonable attorneys' fees) arising from or
+     relating to: (a) your use of the Service; (b) your breach of these
+     Terms; (c) your violation of any law or of the rights of any third
+     party; (d) any content you submit; and (e) any action you take or fail
+     to take in reliance on any output of the Service.
+
+7.2  This obligation survives termination.
+
+8. GENERAL
+
+8.1  Governing law: the State of Florida, without regard to conflict of laws
+     rules. Venue and exclusive jurisdiction lie in the state and federal
+     courts located there, and you consent to personal jurisdiction in those
+     courts.
+
+8.2  Operator may amend these Terms by sending the revised version to your
+     address. Continued use after that constitutes acceptance.
+
+8.3  No fee is charged for the Service. Voluntary contributions, if any, do
+     not create any obligation, entitlement, or service level.
+
+8.4  If any provision is held unenforceable, it is modified to the minimum
+     extent necessary or severed, and the remainder stays in force.
+
+8.5  These Terms are the entire agreement between you and Operator regarding
+     the Service and supersede any prior understanding. Failure to enforce
+     any provision is not a waiver.
+
+8.6  You may not assign these Terms. Operator may assign them freely.
+
+8.7  Sections 3, 4, 5, 6, 7 and 8 survive termination.
+
+TO ACCEPT: reply to the message containing these Terms with the words
+"I AGREE" and nothing else is required. Your reply, together with its date
+and originating address, will be recorded as your acceptance.
+
+Version 0.3 — issued 21 September 2026.

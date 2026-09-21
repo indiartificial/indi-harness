@@ -120,6 +120,31 @@ def _git(cfg, *args: str, timeout: int = 60) -> subprocess.CompletedProcess:
                           capture_output=True, text=True, timeout=timeout)
 
 
+def _commits_ahead(cfg, base: str, ref: str = "HEAD") -> int:
+    """How many commits `ref` has that `base` does not.
+
+    The other half of "did the session change anything". Looking at the
+    index alone answers only "is there uncommitted work", and a session
+    that committed its own work leaves none: clean tree, empty index,
+    every line of the work sitting in commits. Reading that as an empty
+    session and force-deleting the branch is how a day's work once ended
+    up reachable only from the reflog.
+
+    A failed count reports 1 rather than 0 on purpose. Everything that
+    consults this treats a zero as permission to throw the branch away,
+    and git being unable to answer is not evidence that there is nothing
+    there."""
+    out = _git(cfg, "rev-list", "--count", f"{base}..{ref}")
+    if out.returncode != 0:
+        log.warning("Could not count commits on %s against %s: %s", ref, base,
+                    (out.stderr or out.stdout).strip()[:200])
+        return 1
+    try:
+        return int(out.stdout.strip())
+    except ValueError:
+        return 1
+
+
 def _digest_sensitive(cfg) -> dict[str, str]:
     out = {}
     for name in UNTRACKED_SENSITIVE:
@@ -356,11 +381,21 @@ def run(cfg, tool_input: dict) -> str:
     try:
         payload = _invoke(cfg, task)
     except Exception:
-        # Abandon whatever the session had written and go back.
+        # Abandon whatever the session had left uncommitted and go back.
+        # Commits are a different matter: a session that timed out or
+        # crashed after committing still did the work, and deleting the
+        # branch would be the same silent loss as the one guarded against
+        # further down. Count before moving off the branch, and if there
+        # is anything on it, leave it standing for Steve to look at.
+        committed = _commits_ahead(cfg, base)
         _git(cfg, "checkout", "-q", "--", ".")
         _git(cfg, "clean", "-qfd")       # -x omitted: never touches .env & co.
         _git(cfg, "checkout", "-q", base)
-        _git(cfg, "branch", "-qD", branch)
+        if committed:
+            log.warning("The session failed after committing %d change(s); "
+                        "branch %s is left in place.", committed, branch)
+        else:
+            _git(cfg, "branch", "-qD", branch)
         raise
     after = _digest_sensitive(cfg)
 
@@ -380,10 +415,32 @@ def run(cfg, tool_input: dict) -> str:
             f"control and were not reverted: {', '.join(touched)}."
         )
 
+    # "Did the session change anything" is two questions, not one.
+    #
+    # The index answers only the first: is there uncommitted work. The
+    # briefing tells the session its work will be committed to a branch,
+    # and it has a shell, so a session that commits as it goes is
+    # ordinary rather than exceptional — and it leaves nothing at all in
+    # the index. Asking the index alone therefore reads a finished piece
+    # of work as an empty session, and the empty-session path below ends
+    # in `branch -D`, which will happily throw away commits. That is not
+    # hypothetical; it has already cost one session's work.
+    #
+    # So the commits are counted too, and the branch is only deleted when
+    # both answers are no. The branch ref is counted as well as HEAD: a
+    # session that committed and then checked something else out would
+    # otherwise look empty from HEAD, which is the same mistake wearing a
+    # different hat.
     _git(cfg, "add", "-A")
     staged = _git(cfg, "diff", "--cached", "--stat").stdout.strip()
-    if not staged:
+    committed = _commits_ahead(cfg, base)
+    on_branch = _commits_ahead(cfg, base, branch)
+
+    if not staged and not committed and not on_branch:
         _git(cfg, "checkout", "-q", base)
+        # Provably empty by both measures, so there is nothing to lose.
+        # This is the only place a branch is deleted after a session that
+        # ran to completion.
         _git(cfg, "branch", "-qD", branch)
         return _report(
             f"The Claude Code session finished without changing any files{spend}.",
@@ -391,8 +448,23 @@ def run(cfg, tool_input: dict) -> str:
             *notes,
         )
 
-    _git(cfg, "commit", "-q", "-m",
-         f"Indi (Claude Code): {rationale[:120]}\n\n{task[:1500]}")
+    if staged:
+        # Leftovers go on top of whatever the session committed itself,
+        # never instead of it. When it committed nothing this is the whole
+        # of the work and reads exactly as it always did; when it
+        # committed as it went, this is the remainder, and the message
+        # says so rather than claiming to be the change.
+        leftover = ("Working-tree changes left over by a session that "
+                    "committed its own work.\n\n") if committed else ""
+        _git(cfg, "commit", "-q", "-m",
+             f"Indi (Claude Code): {rationale[:120]}\n\n{leftover}{task[:1500]}")
+
+    # What gets reported back is the branch against base, not the commit
+    # made a moment ago. With the session committing its own work that
+    # last commit is the leftovers — or there is no new commit at all —
+    # and neither describes what merging this branch would actually
+    # bring in, which is the only thing the summary is for.
+    summary = _git(cfg, "diff", "--stat", f"{base}...HEAD").stdout.strip()
 
     passed, output = self_code.run_tests(cfg)
     if not passed:
@@ -401,7 +473,7 @@ def run(cfg, tool_input: dict) -> str:
             f"The Claude Code session made changes{spend} but the test suite "
             f"FAILED afterwards, so nothing was merged. The work is on branch "
             f"{branch}.",
-            f"Changed:\n{staged}",
+            f"Changed:\n{summary}",
             f"It reported:\n{answer[:1500]}" if answer else "",
             f"Test output:\n{output[-1500:]}",
             *notes,
@@ -412,7 +484,7 @@ def run(cfg, tool_input: dict) -> str:
         return _report(
             f"The Claude Code session passed the tests{spend} and is waiting on "
             f"branch {branch}. Auto-apply is off, so Steve merges it.",
-            f"Changed:\n{staged}",
+            f"Changed:\n{summary}",
             f"It reported:\n{answer[:1500]}" if answer else "",
             *notes,
         )
@@ -428,7 +500,7 @@ def run(cfg, tool_input: dict) -> str:
     log.warning("CLAUDE CODE merged %s into %s", branch, base)
     return _report(
         f"Applied{spend}: {rationale[:200]}",
-        f"Changed:\n{staged}",
+        f"Changed:\n{summary}",
         f"It reported:\n{answer[:2000]}" if answer else "",
         f"Tests passed; merged from {branch}. It takes effect on the next run.",
         *notes,

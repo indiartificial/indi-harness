@@ -409,8 +409,15 @@ def build_tools(cfg, trusted: bool, have_store: bool,
     # sender's own, and the per-person cap in outbound.py bounds it. The
     # alternative — telling someone their reminder is impossible because
     # they aren't on a list — is worse than the abuse it would prevent.
+    # Listing and cancelling ride along with scheduling, and are scoped
+    # the same way: outbound.py filters on the stored recipient, so the
+    # three tools together can only ever touch this sender's own mail.
+    # Offering the ability to book a repeating reminder without the
+    # ability to stop one would be the wrong half of the feature.
     if have_store and reminder_sender and getattr(cfg, "enable_outbound", False):
         tools.append(outbound.reply_reminder_schema(reminder_sender))
+        tools.append(outbound.reply_list_reminders_schema(reminder_sender))
+        tools.append(outbound.reply_cancel_reminder_schema(reminder_sender))
 
     # The spend ledger. Read-only, and restricted to trusted senders: what
     # the account costs is Steve's business, not a stranger's, and the
@@ -767,6 +774,17 @@ def generate_reply(client, cfg, system_prompt: str, msg: dict,
                 )
                 if not is_error:
                     stats["reminders"] += 1
+            elif call.name == outbound.LIST_REMINDERS_TOOL:
+                # Same reasoning as above for the missing untrusted
+                # markers, with one addition: the subjects listed back
+                # are ones Indi wrote itself when scheduling.
+                text, is_error = outbound.handle_reply_list_reminders(
+                    cfg, store, msg["from_addr"]
+                )
+            elif call.name == outbound.CANCEL_REMINDER_TOOL:
+                text, is_error = outbound.handle_reply_cancel_reminder(
+                    cfg, store, msg["from_addr"], call.input
+                )
             elif self_code_runner is not None and call.name in self_code_runner.tool_names:
                 stats["self_code"] += 1
                 text, is_error = self_code_runner.handle(call.name, call.input)

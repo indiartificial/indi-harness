@@ -84,6 +84,12 @@ asked for.
 
 Storage deliberately reuses SheetStore's generic tab primitives rather
 than adding schema to sheets_queue.py, so this feature is one file.
+
+Everything here is mail the recipient did not just ask for, so all of it
+runs through the terms gate: the heartbeat is only shown correspondents
+who have accepted, `_send` checks again before anything leaves, and a
+due reminder for someone who has not accepted is held rather than sent.
+See terms_gate.py.
 """
 
 from __future__ import annotations
@@ -95,6 +101,7 @@ import os
 import costs
 import gmail_io
 import sheets_queue
+import terms_gate
 
 log = logging.getLogger("indi.outbound")
 
@@ -370,10 +377,16 @@ def _deliver_one(cfg, gmail, recipient: str, subject: str, body: str) -> str:
     return "drafted"
 
 
-def deliver_due_reminders(cfg, gmail, store) -> list[str]:
+def deliver_due_reminders(cfg, gmail, store, people=None) -> list[str]:
     """Send every reminder that has come due. Called at the top of each
     heartbeat, before the model is asked anything — this is the part that
-    has to work whether or not a model is feeling helpful."""
+    has to work whether or not a model is feeling helpful.
+
+    A reminder is still mail arriving unasked-for on the day, so it is
+    subject to the terms gate like everything else. One scheduled before
+    the gate existed, for someone who has not accepted, is left standing
+    rather than failed: they have until the grace window closes to reply
+    "I AGREE", and then it expires on its own."""
     now = _now()
     delivered = 0
     outcomes: list[str] = []
@@ -398,6 +411,16 @@ def deliver_due_reminders(cfg, gmail, store) -> list[str]:
             outcomes.append(
                 f"reminder for {recipient} was {late.days}d"
                 f"{late.seconds // 3600}h late — expired, not sent"
+            )
+            continue
+
+        # After the expiry check above, deliberately: a reminder held
+        # because its recipient never accepted the terms must still age
+        # out, or it would sit in the queue being reconsidered forever.
+        if not terms_gate.may_send_unsolicited(recipient, people):
+            outcomes.append(
+                f"reminder for {recipient} held: they have not accepted the "
+                "Terms of Service"
             )
             continue
 
@@ -616,13 +639,13 @@ def _context(cfg, store) -> str:
 
 
 def run_heartbeat(client, cfg, gmail, store, system_prompt: str,
-                  self_addrs: set[str]) -> str:
+                  self_addrs: set[str], people=None) -> str:
     """One heartbeat. Returns a short outcome string."""
     # Reminders first, and unconditionally: they were asked for, so they
     # don't depend on the model being called at all, and they aren't
     # governed by the initiative budgets below.
     try:
-        reminder_outcomes = deliver_due_reminders(cfg, gmail, store)
+        reminder_outcomes = deliver_due_reminders(cfg, gmail, store, people)
     except Exception:
         log.error("Reminder delivery failed", exc_info=True)
         reminder_outcomes = ["reminder delivery raised an error (see log)"]
@@ -634,7 +657,14 @@ def run_heartbeat(client, cfg, gmail, store, system_prompt: str,
     if sent_today >= cfg.outbound_max_per_day and journal_today >= cfg.journal_max_per_day:
         return prefix + "budgets exhausted for today; skipping"
 
-    recipients = sorted(store.known_correspondents() - self_addrs)
+    # Only people who have accepted the terms are even named to the
+    # model. `_send` checks again before anything goes out — this is the
+    # cheaper half of the same rule, and it keeps Indi from composing a
+    # message it is not allowed to send.
+    recipients = sorted(
+        addr for addr in (store.known_correspondents() - self_addrs)
+        if terms_gate.may_send_unsolicited(addr, people)
+    )
     tools = schemas(cfg, recipients, cfg.outbound_allow_new_recipients)
 
     budget_note = (
@@ -710,13 +740,13 @@ def run_heartbeat(client, cfg, gmail, store, system_prompt: str,
 
     if call.name == SEND_TOOL:
         return prefix + _send(client, cfg, gmail, store, call.input, recipients,
-                              self_addrs, sent_today)
+                              self_addrs, sent_today, people)
 
     return prefix + f"unknown action: {call.name}"
 
 
 def _send(client, cfg, gmail, store, payload: dict, recipients: list[str],
-          self_addrs: set[str], sent_today: int) -> str:
+          self_addrs: set[str], sent_today: int, people=None) -> str:
     to_addr = (payload.get("to") or "").strip().lower()
     subject = (payload.get("subject") or "").strip() or "(no subject)"
     body = (payload.get("body") or "").strip()
@@ -728,6 +758,14 @@ def _send(client, cfg, gmail, store, payload: dict, recipients: list[str],
         return "refused: that's your own address — use the journal instead"
     if not body:
         return "refused: empty message body"
+
+    if not terms_gate.may_send_unsolicited(to_addr, people):
+        # The terms gate, checked here as well as in the recipient list
+        # above, because INDI_OUTBOUND_ALLOW_NEW_RECIPIENTS can put an
+        # address in front of the model that never went through it.
+        log.warning("Refused outbound to %s: has not accepted the Terms.", to_addr)
+        return (f"refused: {to_addr} has not accepted the Terms of Service, so "
+                "nothing can be sent to them until they do")
 
     if not cfg.outbound_allow_new_recipients and to_addr not in recipients:
         # The default policy. An agent that can email anyone it can name is

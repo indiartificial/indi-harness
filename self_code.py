@@ -61,13 +61,19 @@ class SelfCodeError(Exception):
 
 # Whole files Indi may read but not modify.
 PROTECTED_FILES = {
-    "config.py",        # permission tiers, validation
-    "local_tools.py",   # path containment, sandboxing
-    "gmail_io.py",      # loop guards, sender authentication
-    "self_code.py",     # this gate itself
+    "config.py",         # permission tiers, validation
+    "local_tools.py",    # path containment, sandboxing
+    "gmail_io.py",       # loop guards, sender authentication
+    "self_code.py",      # this gate itself
+    "terms_gate.py",     # who may be replied to at all
+    "terms.py",          # which agreement is in force
+    "correspondents.py", # who accepted it, and when
 }
 
-PROTECTED_DIRS = {"tests", "deploy"}
+# data/ holds the Terms of Service themselves and the record of who has
+# accepted them. A gate whose subject can rewrite the contract, or the
+# register of signatures, is not a gate.
+PROTECTED_DIRS = {"tests", "deploy", "data"}
 
 # Files that are never readable through these tools at all.
 SECRET_FILES = {".env", "api_key.txt", "token.json", "credentials.json"}

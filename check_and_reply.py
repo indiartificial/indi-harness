@@ -42,6 +42,13 @@ they mattered:
    exchanges and the live thread overlap almost completely during an
    active conversation; the ones already present in the thread text are
    left out of the pending block.
+
+8. **The terms gate.** Before the reply model is called at all, the
+   sender has to have accepted the Terms of Service — see
+   `terms_gate.py`. A stranger's first message is answered with the
+   terms and nothing else. This sits between the guards above and every
+   other thing this file does, because it decides whether there is
+   anything to do.
 """
 
 from __future__ import annotations
@@ -61,6 +68,7 @@ import anthropic
 
 import claude_api
 import claude_code
+import correspondents
 import costs
 import gmail_io
 import local_tools
@@ -69,6 +77,8 @@ import memory_file
 import outbound
 import self_code
 import sheets_queue
+import terms
+import terms_gate
 from config import Config, matches_sender
 
 SCOPES = [
@@ -347,7 +357,8 @@ def redundant_pending_ids(pending_rows: list[dict], thread_ids: set[str],
 # ---------------------------------------------------------------------------
 
 def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.SheetStore,
-                    raw_message: dict, selves: set[str], system_prompt: str) -> str:
+                    raw_message: dict, selves: set[str], system_prompt: str,
+                    people: correspondents.CorrespondentStore) -> str:
     """Handles one message end to end. Returns a short outcome string.
     Raises only on genuinely unexpected errors, which the caller records
     as `failed` so the message can be retried next run."""
@@ -386,6 +397,29 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
             store.set_status(row, sheets_queue.STATUS_SKIPPED, reason)
         mark_as_read(gmail, msg["gmail_msg_id"])
         return f"skipped ({reason})"
+
+    # --- terms of service -----------------------------------------------
+    # Deliberately after the guards above and before everything below.
+    # After, because there is no point papering an autoresponder. Before,
+    # because everything below this line either costs money or says
+    # something to the sender, and until they have accepted the terms we
+    # are not entitled to do either.
+    gate = terms_gate.check_inbound(cfg, gmail, claude, msg, people)
+    if not gate.proceed:
+        log.info("Terms gate: %s", gate.outcome)
+        if cfg.dry_run:
+            return f"would stop at the terms gate ({gate.outcome})"
+        # `skipped` throughout, including where a fixed notice went out:
+        # the status column is about whether the reply model produced a
+        # reply, and the note says what the gate sent instead.
+        if existing:
+            store.set_status(existing, sheets_queue.STATUS_SKIPPED, gate.outcome)
+        else:
+            store.append_queue_row(msg, sheets_queue.STATUS_SKIPPED, gate.outcome)
+        mark_as_read(gmail, msg["gmail_msg_id"])
+        return f"terms gate: {gate.outcome}"
+    if gate.outcome != "terms accepted":
+        log.info("Terms gate: %s", gate.outcome)
 
     trusted = cfg.is_trusted(sender)
     scope_all_history = cfg.may_search_all_history(sender)
@@ -600,13 +634,21 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
         log.info("Reply carries %d generated attachment(s): %s",
                  len(attachments), ", ".join(n for n, _ in attachments))
 
+    # Re-papering: the sender accepted an older version, so the reply is
+    # still theirs but the current terms travel with it. Added before the
+    # signature goes on, so the note reads as part of the message rather
+    # than as something bolted on after the sign-off.
+    if gate.notice:
+        clean_body = clean_body.rstrip() + "\n\n" + gate.notice
+
     signed_body = ensure_signature(clean_body)
     if signed_body != clean_body:
         log.info("Signature was missing from the reply; appended it.")
         clean_body = signed_body
 
     safe_attachments = [
-        (gmail_io.sanitise_filename(name), content) for name, content in attachments
+        (gmail_io.sanitise_filename(name), content)
+        for name, content in [*attachments, *gate.attachments]
     ]
 
     if cfg.dry_run:
@@ -643,6 +685,12 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
     store.set_status(row, sheets_queue.STATUS_REPLIED, outcome)
     mark_as_read(gmail, msg["gmail_msg_id"])
     log.info("Reply %s.", outcome)
+
+    # Only now is it true that the new terms were sent. Recording it any
+    # earlier would mean a reply that failed to go out still counted as
+    # having delivered them.
+    if gate.commit is not None:
+        gate.commit()
 
     memory_file.consolidate(claude, cfg, drive, store, sender)
     return outcome
@@ -694,6 +742,7 @@ def main() -> int:
 
     lock = acquire_lock(cfg.lock_path)
     store = None
+    people = None
     try:
         creds = get_credentials(cfg)
         gmail = build("gmail", "v1", credentials=creds, cache_discovery=False)
@@ -748,12 +797,27 @@ def main() -> int:
         store = sheets_queue.SheetStore(sheets, drive, cfg)
         store.ensure_spreadsheets()
 
+        # Who has accepted the terms. Local, and read-only under
+        # --dry-run so a rehearsal cannot record an acceptance that never
+        # actually happened.
+        people = correspondents.CorrespondentStore(read_only=cfg.dry_run)
+        current_terms = terms.load()
+        if current_terms is None:
+            log.error(
+                "No Terms of Service could be loaded from %s. Correspondents "
+                "who have not already accepted will get no reply at all until "
+                "a version file is put there.", terms.TERMS_DIR,
+            )
+        else:
+            log.info("Terms of service v%s in force (%s).",
+                     current_terms.version, current_terms.path.name)
+
         if args.heartbeat:
             if not cfg.enable_outbound:
                 log.info("Outbound initiative is disabled (INDI_ENABLE_OUTBOUND).")
                 return 0
             outcome = outbound.run_heartbeat(
-                claude, cfg, gmail, store, system_prompt, selves
+                claude, cfg, gmail, store, system_prompt, selves, people
             )
             log.info("Heartbeat: %s", outcome)
             return 0
@@ -766,7 +830,8 @@ def main() -> int:
         # row is marked sent the moment it goes.
         if cfg.enable_outbound:
             try:
-                for outcome in outbound.deliver_due_reminders(cfg, gmail, store):
+                for outcome in outbound.deliver_due_reminders(cfg, gmail, store,
+                                                              people):
                     log.info("Reminder: %s", outcome)
             except Exception:
                 log.error("Reminder delivery failed", exc_info=True)
@@ -793,7 +858,8 @@ def main() -> int:
         for detail in details:
             try:
                 outcome = process_message(
-                    gmail, drive, claude, cfg, store, detail, selves, system_prompt
+                    gmail, drive, claude, cfg, store, detail, selves,
+                    system_prompt, people,
                 )
                 log.info("Outcome: %s", outcome)
             except Exception as exc:
@@ -815,6 +881,8 @@ def main() -> int:
         # before dying — those calls were billed either way. Covers the
         # heartbeat and the no-mail path too, which return early.
         record_spend(store, cfg)
+        if people is not None:
+            people.close()
         lock.release()
 
 

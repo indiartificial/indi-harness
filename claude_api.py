@@ -59,6 +59,7 @@ import logging
 import os
 import re
 
+import attachments
 import costs
 import outbound
 import sheets_queue
@@ -244,18 +245,24 @@ def delete_uploaded_files(client, file_ids: list[str]) -> None:
 
 
 def build_attachment_blocks(gmail, cfg, msg: dict, client, trusted: bool):
-    """Returns (blocks, uploaded_file_ids).
+    """Returns (blocks, uploaded_file_ids, stored_paths).
 
     For untrusted senders, code execution is off, so text attachments are
     inlined (truncated) rather than uploaded. That also avoids paying for a
     code-execution container session on every email that happens to carry a
     .txt file — containers are billed with a five-minute minimum, and the
     files are preloaded onto the container whether or not any code runs.
+
+    Every attachment whose bytes we hold is also written to the attachment
+    store on the way past — including the types this function has no block
+    for. A .docx is unreadable to the model today and is still the document
+    the conversation is about, so it is kept rather than discarded.
     """
     max_bytes = cfg.max_incoming_attachment_mb * 1024 * 1024
     blocks: list[dict] = []
     uploaded_ids: list[str] = []
     uploaded_names: list[str] = []
+    stored_paths: list[str] = []
     skipped: list[str] = []
 
     use_container = (
@@ -273,6 +280,20 @@ def build_attachment_blocks(gmail, cfg, msg: dict, client, trusted: bool):
         except Exception as exc:
             skipped.append(f"{filename} (download failed: {exc})")
             continue
+
+        # Before any decision about what the model can see: the file is
+        # in hand now, and this is the only moment it ever will be.
+        try:
+            rel = attachments.store(
+                cfg, msg["gmail_msg_id"], filename, data,
+                attachments.DIRECTION_IN,
+                sender=msg.get("from_addr", ""), subject=msg.get("subject", ""),
+            )
+            if rel:
+                stored_paths.append(rel)
+        except Exception:
+            log.warning("Could not store the incoming attachment %r.",
+                        filename, exc_info=True)
 
         if mime_type in IMAGE_MIME_TYPES:
             blocks.append({
@@ -322,8 +343,16 @@ def build_attachment_blocks(gmail, cfg, msg: dict, client, trusted: bool):
             "type": "text",
             "text": "[Attachments present but not read: " + "; ".join(skipped) + "]",
         })
+    # Only worth saying when the tools that could act on it are offered —
+    # otherwise it names a tool this message doesn't have.
+    if stored_paths and cfg.enable_history_search:
+        blocks.append({
+            "type": "text",
+            "text": ("[Kept in the attachment store, readable later with "
+                     f"{attachments.READ_TOOL}: " + ", ".join(stored_paths) + "]"),
+        })
 
-    return blocks, uploaded_ids
+    return blocks, uploaded_ids, stored_paths
 
 
 # ---------------------------------------------------------------------------
@@ -366,6 +395,14 @@ def build_tools(cfg, trusted: bool, have_store: bool,
 
     if cfg.enable_history_search and have_store:
         tools.append(history_search_schema(scoped_to_sender=not scope_all_history))
+
+    # The attachment store. Offered to exactly the senders who get the
+    # history search, and scoped the same way they are scoped there: a
+    # correspondent who may only search their own thread may only see the
+    # files from their own thread. The store lives on disk rather than in
+    # the sheets, so it does not need `have_store`.
+    if cfg.enable_history_search and getattr(cfg, "store_attachments", False):
+        tools.extend(attachments.schemas(scoped_to_sender=not scope_all_history))
 
     # Reminders. Offered to everyone Indi replies to, not just trusted
     # senders: the only address it can ever schedule mail to is the
@@ -645,7 +682,7 @@ def generate_reply(client, cfg, system_prompt: str, msg: dict,
 
     stats = {"server_tools": 0, "history_searches": 0, "local_tools": 0,
              "self_code": 0, "claude_code": 0, "cost_ledger": 0,
-             "reminders": 0, "set_aside": None,
+             "reminders": 0, "attachments": 0, "set_aside": None,
              "cache_read": 0, "cache_created": 0, "iterations": 0,
              # Every billable token this message consumes, summed across
              # the tool loop. Priced by the caller, which knows the model.
@@ -711,6 +748,15 @@ def generate_reply(client, cfg, system_prompt: str, msg: dict,
                     text, is_error = _run_cost_ledger(
                         store, call.input, include_notes=scope_all_history
                     ), False
+            elif call.name in attachments.TOOL_NAMES:
+                stats["attachments"] += 1
+                text, is_error = attachments.handle(
+                    cfg, call.name, call.input, restrict_to_sender=restrict_to
+                )
+                # A stored attachment is a file somebody emailed in. It is
+                # untrusted for exactly the reason the email was.
+                if not is_error:
+                    text = f"{UNTRUSTED_OPEN}\n{text}\n{UNTRUSTED_CLOSE}"
             elif call.name == outbound.REMINDER_TOOL:
                 # Not wrapped in the untrusted markers: the result is this
                 # script's own sentence about what it did, not content

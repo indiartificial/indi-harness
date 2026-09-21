@@ -77,6 +77,37 @@ The bounds that make this safe to leave running:
     off, Gmail was down — it expires unsent rather than arriving at three
     in the morning two days later, which is worse than useless for
     anything time-bound.
+  * A repeating reminder is bounded twice over: an interval of at least
+    an hour, and at most MAX_OCCURRENCES_PER_SERIES messages in a series
+    even when nobody gave an end date. It is the only thing in here that
+    keeps sending without anyone asking again, so a series that stops on
+    its own has to be the default rather than something to remember.
+
+REPEATS AND CANCELLING
+----------------------
+"Every morning" and "on the first of the month" are most of what anyone
+actually wants from a reminder, so a row can carry a recurrence: an
+interval, a unit, a remaining count and an optional end date. A series
+keeps exactly one pending row at a time and books the next occurrence
+when the current one is delivered — or when it expires unsent, because a
+machine that was off for two days must not silently end a daily series.
+That roll-forward deliberately doesn't go through `_schedule`: the
+pending quotas there exist to stop one correspondent booking fifty
+reminders, and a series replacing its own single row is not that.
+
+Missed occurrences are skipped rather than queued: the next due time is
+advanced past now and at most the current one goes out, so two days off
+the air costs a daily series two messages instead of delivering them all
+at once over breakfast. Each occurrence is computed from the series
+anchor rather than from the previous one, so a monthly reminder booked
+for the 31st doesn't slide permanently to the 28th the first time it
+passes through February.
+
+And a repeating reminder has to be stoppable, which a one-shot never
+really needed. `list_reminders` and `cancel_reminder` sit alongside
+`schedule_reminder` on the reply path, scoped in code to the
+correspondent's own address exactly the way scheduling is: nobody can
+see, or cancel, a reminder addressed to anyone but themselves.
 
 Reminders don't consume the outbound daily budget. That budget exists to
 stop Indi from deciding on its own to write to people; a reminder was
@@ -94,9 +125,11 @@ See terms_gate.py.
 
 from __future__ import annotations
 
+import calendar
 import datetime
 import logging
 import os
+import uuid
 
 import costs
 import gmail_io
@@ -108,19 +141,31 @@ log = logging.getLogger("indi.outbound")
 SEND_TOOL = "send_new_message"
 JOURNAL_TOOL = "write_journal_entry"
 REMINDER_TOOL = "schedule_reminder"
+LIST_REMINDERS_TOOL = "list_reminders"
+CANCEL_REMINDER_TOOL = "cancel_reminder"
 NOTHING_TOOL = "do_nothing"
 
 # -- reminders ---------------------------------------------------------
 
 REMINDERS_TAB = "Reminders"
+# The recurrence columns are appended, never inserted, for two reasons.
+# `_ensure_headers` upgrades a deployed sheet by adding whatever columns
+# it is missing at the end, so rows written before repeats existed keep
+# their values and read back with these blank — which is precisely how a
+# one-shot reminder is spelled, and is the whole of the migration.
+# `_set_reminder_status` also writes the status..sent_at range by index,
+# so nothing may move above it either.
 REMINDERS_HEADERS = [
     "due_at", "recipient", "subject", "body", "status", "created_at", "sent_at",
+    "reminder_id", "series_id", "repeat_every", "repeat_unit",
+    "repeat_count_left", "repeat_until", "repeat_anchor",
 ]
 
 STATUS_SCHEDULED = "scheduled"
 STATUS_SENT = "sent"
 STATUS_EXPIRED = "expired"
 STATUS_FAILED = "failed"
+STATUS_CANCELLED = "cancelled"
 
 # How late a reminder may be and still be worth sending.
 REMINDER_GRACE_HOURS = 24
@@ -133,6 +178,19 @@ MAX_PENDING_REMINDERS = 50
 # what keeps that from being worth abusing.
 MAX_PENDING_PER_RECIPIENT = 10
 MAX_DAYS_AHEAD = 400
+
+# Recurrence. Units are whole-numbered, so the shortest interval anyone
+# can ask for is an hour; anything finer is a mailing list, not a
+# reminder.
+REPEAT_UNITS = ("hours", "days", "weeks", "months", "years")
+# The hard ceiling on how many messages one series may ever send. It
+# applies even when the caller gives no count and no end date, because
+# the failure mode of an automated sender is not sending too few.
+MAX_OCCURRENCES_PER_SERIES = 365
+# A stop on the catch-up walk. It should never bind — the estimate in
+# `_estimate_index` lands within a step or two — but an unbounded loop
+# over dates is not something to leave running on a timer.
+MAX_CATCHUP_STEPS = 1000
 
 # The heartbeat's default model. Haiku, because a heartbeat is one short
 # decision made on a timer: most of them end in do_nothing, and paying
@@ -180,6 +238,56 @@ def heartbeat_model(cfg) -> str:
     return DEFAULT_HEARTBEAT_MODEL
 
 
+def repeat_properties() -> dict:
+    """The repeat_* arguments, identical on both copies of the scheduling
+    tool. Written out honestly, bounds included: a model that knows the
+    limits asks for something inside them instead of promising a person
+    a daily reminder forever and then reading a refusal."""
+    return {
+        "repeat_every": {
+            "type": "integer",
+            "description": (
+                "Optional. With repeat_unit, makes this a repeating "
+                "reminder: 'every 3 days' is repeat_every 3, repeat_unit "
+                "days. Whole numbers of at least 1; the shortest interval "
+                "possible is one hour. Leave both out for a single message. "
+                "Everything is held in UTC, so a repeat keeps the same UTC "
+                "time and lands an hour off someone's local clock either side "
+                "of a daylight-saving change — worth saying if the exact hour "
+                "matters to them."
+            ),
+        },
+        "repeat_unit": {
+            "type": "string",
+            "enum": list(REPEAT_UNITS),
+            "description": (
+                "Optional, and required if repeat_every is given. Months "
+                "and years keep the day of the month, clamped where it "
+                "doesn't exist: the 31st becomes the 28th in February and "
+                "is the 31st again in March."
+            ),
+        },
+        "repeat_count": {
+            "type": "integer",
+            "description": (
+                "Optional. How many messages the series sends in total, "
+                "including the first. At least 2 and at most "
+                f"{MAX_OCCURRENCES_PER_SERIES}, which is also the cap "
+                "applied when you give neither this nor repeat_until — no "
+                "series runs forever."
+            ),
+        },
+        "repeat_until": {
+            "type": "string",
+            "description": (
+                "Optional. ISO 8601 with a UTC offset, like due_at. The "
+                "series stops after this; it must be in the future and "
+                f"within {MAX_DAYS_AHEAD} days."
+            ),
+        },
+    }
+
+
 def schemas(cfg, recipients: list[str], allow_new: bool) -> list[dict]:
     recipient_note = (
         "You may write to any address."
@@ -219,7 +327,10 @@ def schemas(cfg, recipients: list[str], allow_new: bool) -> list[dict]:
                 "after the due time, so expect it to land within a few minutes "
                 "of the time you ask for. If it cannot be delivered within "
                 f"{REMINDER_GRACE_HOURS} hours of the due time it is dropped "
-                "rather than sent late. Same recipient rule as sending: "
+                "rather than sent late. It can repeat — see the repeat_* "
+                "fields — and a repeat that was missed while nothing was "
+                "running resumes at its next occurrence rather than sending "
+                "the backlog. Same recipient rule as sending: "
                 + recipient_note
             ),
             "input_schema": {
@@ -240,6 +351,7 @@ def schemas(cfg, recipients: list[str], allow_new: bool) -> list[dict]:
                     "body": {"type": "string",
                              "description": "Plain text, no markdown. Write the "
                                             "whole message; nothing is added later."},
+                    **repeat_properties(),
                 },
                 "required": ["to", "due_at", "subject", "body"],
             },
@@ -321,6 +433,157 @@ def parse_when(value: str) -> datetime.datetime | None:
     return when.astimezone(datetime.timezone.utc)
 
 
+# -- recurrence arithmetic ---------------------------------------------
+#
+# Written by hand rather than pulled from dateutil: a new dependency in
+# the deploy in exchange for a dozen lines of month arithmetic is a poor
+# trade, and the two cases that actually go wrong — the 31st of a short
+# month and the 29th of February — are easier to test than to argue
+# about.
+
+def _days_in_month(year: int, month: int) -> int:
+    return calendar.monthrange(year, month)[1]
+
+
+def _add_months(base: datetime.datetime, months: int) -> datetime.datetime:
+    """`base` shifted by whole months, clamping the day of the month.
+
+    31 January plus one month is 28 February — 29 in a leap year —
+    because there is no 31st to land on. The clamp applies to the result
+    only; it is never written back into the series anchor, which is what
+    keeps the following month from inheriting the shortened day."""
+    total = base.month - 1 + months
+    year = base.year + total // 12
+    month = total % 12 + 1
+    return base.replace(year=year, month=month,
+                        day=min(base.day, _days_in_month(year, month)))
+
+
+def _occurrence(anchor: datetime.datetime, every: int, unit: str,
+                index: int) -> datetime.datetime:
+    """The `index`-th occurrence of a series, counted from its anchor.
+
+    Always from the anchor, never from the previous occurrence. Stepping
+    month by month from the last due date would move the 31st of January
+    to the 28th of February and then leave the series on the 28th for
+    good; from the anchor, March is the 31st again."""
+    if unit == "hours":
+        return anchor + datetime.timedelta(hours=every * index)
+    if unit == "days":
+        return anchor + datetime.timedelta(days=every * index)
+    if unit == "weeks":
+        return anchor + datetime.timedelta(weeks=every * index)
+    if unit == "months":
+        return _add_months(anchor, every * index)
+    if unit == "years":
+        return _add_months(anchor, every * 12 * index)
+    raise ValueError(f"unknown repeat unit {unit!r}")
+
+
+def _estimate_index(anchor: datetime.datetime, every: int, unit: str,
+                    after: datetime.datetime) -> int:
+    """A starting guess at or below the right index, so `next_occurrence`
+    walks a step or two rather than counting up from the anchor: an
+    hourly series a year in is nine thousand steps otherwise."""
+    if after <= anchor:
+        return 0
+    if unit in ("hours", "days", "weeks"):
+        return max(0, int((after - anchor) // datetime.timedelta(**{unit: every})))
+    months = every * (12 if unit == "years" else 1)
+    gap = (after.year - anchor.year) * 12 + (after.month - anchor.month)
+    return max(0, gap // months)
+
+
+def next_occurrence(anchor: datetime.datetime, every: int, unit: str,
+                    after: datetime.datetime) -> datetime.datetime | None:
+    """The first occurrence of a series strictly after `after`.
+
+    Passing `now` in here is the whole of the catch-up rule: a series
+    whose due time is three days in the past lands on the next
+    occurrence from now, and the ones in between are skipped rather than
+    sent in a burst."""
+    if anchor is None or every < 1 or unit not in REPEAT_UNITS:
+        return None
+    index = _estimate_index(anchor, every, unit, after)
+    for _ in range(MAX_CATCHUP_STEPS):
+        when = _occurrence(anchor, every, unit, index)
+        if when > after:
+            return when
+        index += 1
+    # Only reachable if the estimate is badly wrong. Ending the series is
+    # the safe way to fail: nothing more goes out.
+    log.warning("Gave up advancing an every-%s-%s series past %s",
+                every, unit, after.isoformat())
+    return None
+
+
+def _as_int(value) -> int | None:
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalise_unit(value: str) -> str:
+    """'Day', 'days', 'DAYS' -> 'days'; anything else -> ''."""
+    unit = (value or "").strip().lower()
+    if unit and not unit.endswith("s"):
+        unit += "s"
+    return unit if unit in REPEAT_UNITS else ""
+
+
+def _repeat_of(row: dict) -> dict | None:
+    """The recurrence stored on a row, or None if it is a one-shot.
+
+    Every row written before repeats existed has these columns blank —
+    or missing entirely, if the sheet has not been re-read since
+    `_ensure_headers` extended it — and reads back here as a one-shot,
+    which is exactly what it is."""
+    every = _as_int(row.get("repeat_every", ""))
+    unit = _normalise_unit(row.get("repeat_unit", ""))
+    if not unit or every is None or every < 1:
+        return None
+    return {
+        "every": every,
+        "unit": unit,
+        "count_left": max(0, _as_int(row.get("repeat_count_left", "")) or 0),
+        "until": parse_when(row.get("repeat_until", "")),
+        # Falling back to the row's own due time matters for a row that
+        # was rolled forward by an older version of this code, or edited
+        # by hand: a series without an anchor is still a series.
+        "anchor": (parse_when(row.get("repeat_anchor", ""))
+                   or parse_when(row.get("due_at", ""))),
+    }
+
+
+def describe_repeat(row: dict) -> str:
+    """How a recurrence reads to a person: 'every 3 days, 4 more'."""
+    repeat = _repeat_of(row)
+    if repeat is None:
+        return "one-off"
+    every, unit = repeat["every"], repeat["unit"]
+    text = f"every {unit[:-1]}" if every == 1 else f"every {every} {unit}"
+    text += f", {repeat['count_left']} more" if repeat["count_left"] else ", last one"
+    if repeat["until"]:
+        text += f", ending by {repeat['until'].date().isoformat()}"
+    return text
+
+
+def _new_id(prefix: str) -> str:
+    """Short, unguessable-enough ids. They are only ever quoted back by
+    someone who was shown them, and the scope check does the real work."""
+    return f"{prefix}-{uuid.uuid4().hex[:10]}"
+
+
+def reminder_ref(row: dict) -> str:
+    """How a reminder is named to a correspondent, and matched coming back.
+
+    Rows written before this change have no reminder_id and still have to
+    be listable and cancellable, so the sheet's own row number is the
+    fallback — stable for as long as the row exists, which is forever."""
+    return (row.get("reminder_id") or "").strip() or f"row{row.get('_row', '?')}"
+
+
 def _reminder_rows(store) -> list[dict]:
     try:
         store._ensure_tab(store.responses_id, REMINDERS_TAB, REMINDERS_HEADERS)
@@ -377,6 +640,69 @@ def _deliver_one(cfg, gmail, recipient: str, subject: str, body: str) -> str:
     return "drafted"
 
 
+def _roll_series_forward(store, row: dict, now: datetime.datetime) -> str:
+    """Book the next occurrence of a recurring reminder, if there is one.
+
+    Called when an occurrence is sent and also when one expires unsent:
+    two days with the machine off must not quietly end a daily series,
+    and the expired row is still the series' only pending row.
+
+    Deliberately not `_schedule`. The pending quotas there exist to stop
+    one correspondent booking fifty reminders at once; a series holds
+    exactly one pending row and this one replaces the row that is
+    finishing, so running it through those checks would mean a busy queue
+    silently killing a series someone is relying on.
+
+    Returns a short note for the run's outcome list, or "" if the row
+    wasn't recurring in the first place."""
+    repeat = _repeat_of(row)
+    if repeat is None:
+        return ""
+
+    recipient = (row.get("recipient") or "").strip().lower()
+    if repeat["count_left"] < 1:
+        return f"the repeating reminder for {recipient} has finished its run"
+
+    due = parse_when(row.get("due_at", "")) or now
+    # max(due, now) is the catch-up rule: never book a time already past,
+    # however long this row sat there.
+    nxt = next_occurrence(repeat["anchor"], repeat["every"], repeat["unit"],
+                          max(due, now))
+    if nxt is None:
+        return (f"could not work out the next occurrence for {recipient}; "
+                "the series ends here")
+    if repeat["until"] and nxt > repeat["until"]:
+        return f"the repeating reminder for {recipient} has reached its end date"
+    if nxt - now > datetime.timedelta(days=MAX_DAYS_AHEAD):
+        return (f"the next occurrence for {recipient} would be more than "
+                f"{MAX_DAYS_AHEAD} days away; the series ends here")
+
+    _append_reminder(store, {
+        "due_at": nxt.isoformat(),
+        "recipient": recipient,
+        "subject": row.get("subject", ""),
+        "body": row.get("body", ""),
+        "status": STATUS_SCHEDULED,
+        "created_at": now.isoformat(),
+        "sent_at": "",
+        "reminder_id": _new_id("r"),
+        # A series that somehow lost its id gets one now rather than
+        # becoming uncancellable as a group.
+        "series_id": (row.get("series_id") or "").strip() or _new_id("s"),
+        "repeat_every": str(repeat["every"]),
+        "repeat_unit": repeat["unit"],
+        # One per message actually booked, not one per interval that went
+        # by: the count is a budget on how much mail a series may send,
+        # and occurrences skipped while the machine was off sent none.
+        "repeat_count_left": str(repeat["count_left"] - 1),
+        "repeat_until": repeat["until"].isoformat() if repeat["until"] else "",
+        "repeat_anchor": repeat["anchor"].isoformat(),
+    })
+    log.info("Rolled the series for %s forward to %s (%d left).",
+             recipient, nxt.isoformat(), repeat["count_left"] - 1)
+    return f"next occurrence for {recipient} booked for {nxt.isoformat()}"
+
+
 def deliver_due_reminders(cfg, gmail, store, people=None) -> list[str]:
     """Send every reminder that has come due. Called at the top of each
     heartbeat, before the model is asked anything — this is the part that
@@ -412,6 +738,13 @@ def deliver_due_reminders(cfg, gmail, store, people=None) -> list[str]:
                 f"reminder for {recipient} was {late.days}d"
                 f"{late.seconds // 3600}h late — expired, not sent"
             )
+            # A missed occurrence must not take the rest of the series
+            # with it. This is the case the roll-forward exists for: the
+            # machine was off, today's message is past saving, tomorrow's
+            # is not.
+            rolled = _roll_series_forward(store, row, now)
+            if rolled:
+                outcomes.append(rolled)
             continue
 
         # After the expiry check above, deliberately: a reminder held
@@ -448,8 +781,88 @@ def deliver_due_reminders(cfg, gmail, store, people=None) -> list[str]:
         delivered += 1
         log.info("Reminder %s to %s (due %s).", outcome, recipient, row.get("due_at"))
         outcomes.append(f"reminder {outcome} to {recipient}")
+        rolled = _roll_series_forward(store, row, now)
+        if rolled:
+            outcomes.append(rolled)
 
     return outcomes
+
+
+def _read_repeat_request(payload: dict, due: datetime.datetime,
+                         now: datetime.datetime) -> tuple[dict | None, str]:
+    """Read the repeat_* arguments of a scheduling call.
+
+    Returns (columns, refusal): the block of columns to store — empty for
+    an ordinary one-shot — or a "refused: ..." string when the request
+    can't be honoured as asked. Refusing out loud matters more here than
+    anywhere else in this file, because the caller is a model about to
+    write a person a sentence describing what it just arranged; an
+    "every 3 days" quietly downgraded to a single message is a promise
+    nobody kept."""
+    raw_every = payload.get("repeat_every")
+    raw_unit = payload.get("repeat_unit")
+    asked_for_a_repeat = any(
+        str(v or "").strip() for v in
+        (raw_every, raw_unit, payload.get("repeat_count"),
+         payload.get("repeat_until"))
+    )
+    if not asked_for_a_repeat:
+        return {}, ""
+
+    every = _as_int(raw_every)
+    unit = _normalise_unit(str(raw_unit or ""))
+    if every is None or not unit:
+        return None, ("refused: a repeating reminder needs both repeat_every "
+                      "(a whole number) and repeat_unit (one of "
+                      + ", ".join(REPEAT_UNITS) + ")")
+    if every < 1:
+        # Which is also the one-hour floor: hours is the smallest unit,
+        # so an interval of at least 1 is an interval of at least an hour.
+        return None, ("refused: repeat_every must be a whole number of at "
+                      "least 1, and the shortest interval allowed is one hour")
+
+    count = _as_int(payload.get("repeat_count")) \
+        if str(payload.get("repeat_count") or "").strip() else None
+    if count is not None:
+        if count < 2:
+            return None, ("refused: repeat_count is how many messages the "
+                          "series sends in total and must be at least 2; for "
+                          "a single message, leave the repeat fields out")
+        if count > MAX_OCCURRENCES_PER_SERIES:
+            return None, (f"refused: {count} occurrences is more than the "
+                          f"{MAX_OCCURRENCES_PER_SERIES} one series may send")
+
+    until = None
+    until_text = str(payload.get("repeat_until") or "").strip()
+    if until_text:
+        until = parse_when(until_text)
+        if until is None:
+            return None, (f"refused: could not read {until_text!r} as the date "
+                          "the repeat should stop")
+        if until <= now:
+            return None, (f"refused: the repeat's end {until.isoformat()} is "
+                          "not in the future")
+        if until - now > datetime.timedelta(days=MAX_DAYS_AHEAD):
+            return None, (f"refused: the repeat's end is more than "
+                          f"{MAX_DAYS_AHEAD} days ahead")
+        if until < due:
+            return None, ("refused: the repeat ends before the first reminder "
+                          "is even due")
+
+    # No end condition still gets one. A series nobody bounded is the
+    # thing this constant exists to stop.
+    total = count or MAX_OCCURRENCES_PER_SERIES
+    return {
+        "series_id": _new_id("s"),
+        "repeat_every": str(every),
+        "repeat_unit": unit,
+        # What is left *after* the occurrence being scheduled now.
+        "repeat_count_left": str(total - 1),
+        "repeat_until": until.isoformat() if until else "",
+        # The anchor is the first due time, and every later occurrence is
+        # counted from it rather than from its predecessor.
+        "repeat_anchor": due.isoformat(),
+    }, ""
 
 
 def _schedule(cfg, store, payload: dict, recipients: list[str],
@@ -474,6 +887,10 @@ def _schedule(cfg, store, payload: dict, recipients: list[str],
     if due - now > datetime.timedelta(days=MAX_DAYS_AHEAD):
         return f"refused: more than {MAX_DAYS_AHEAD} days ahead"
 
+    repeat_fields, refusal = _read_repeat_request(payload, due, now)
+    if refusal:
+        return refusal
+
     if not cfg.outbound_allow_new_recipients and to_addr not in recipients:
         log.warning("Refused reminder for %s: not an existing correspondent.", to_addr)
         return f"refused: {to_addr} is not someone you're already corresponding with"
@@ -491,12 +908,7 @@ def _schedule(cfg, store, payload: dict, recipients: list[str],
                 and (row.get("due_at") or "").strip() == due.isoformat()):
             return "refused: an identical reminder is already scheduled"
 
-    if cfg.dry_run:
-        print(f"\n[dry-run] reminder for {due.isoformat()}\nTO: {to_addr}\n"
-              f"SUBJECT: {subject}\n{'-'*60}\n{body}\n")
-        return "dry run (reminder not scheduled)"
-
-    _append_reminder(store, {
+    record = {
         "due_at": due.isoformat(),
         "recipient": to_addr,
         "subject": subject[:500],
@@ -504,9 +916,27 @@ def _schedule(cfg, store, payload: dict, recipients: list[str],
         "status": STATUS_SCHEDULED,
         "created_at": now.isoformat(),
         "sent_at": "",
-    })
-    log.info("Reminder scheduled for %s at %s.", to_addr, due.isoformat())
-    return f"reminder scheduled for {to_addr} at {due.isoformat()}"
+        "reminder_id": _new_id("r"),
+        "series_id": "",
+        "repeat_every": "",
+        "repeat_unit": "",
+        "repeat_count_left": "",
+        "repeat_until": "",
+        "repeat_anchor": "",
+    }
+    record.update(repeat_fields)
+    repeat_note = f", repeating {describe_repeat(record)}" if repeat_fields else ""
+
+    if cfg.dry_run:
+        print(f"\n[dry-run] reminder for {due.isoformat()}{repeat_note}\n"
+              f"TO: {to_addr}\nSUBJECT: {subject}\n{'-'*60}\n{body}\n")
+        return "dry run (reminder not scheduled)"
+
+    _append_reminder(store, record)
+    log.info("Reminder scheduled for %s at %s%s.", to_addr, due.isoformat(),
+             repeat_note)
+    return (f"reminder scheduled for {to_addr} at {due.isoformat()}"
+            f"{repeat_note} (id {record['reminder_id']})")
 
 
 # ---------------------------------------------------------------------------
@@ -540,12 +970,19 @@ def reply_reminder_schema(sender: str, now: datetime.datetime | None = None) -> 
             "the sender did not actually ask to be reminded about. Delivery is "
             "done by ordinary code on the first run after the due time, so it "
             "lands within a few minutes of the time you give; it does not "
-            "depend on anything you do later. It cannot be cancelled or edited "
-            "once scheduled, and if it cannot be delivered within "
+            "depend on anything you do later. It can also repeat — see the "
+            "repeat_* fields — in which case one occurrence is booked at a "
+            "time and the next is arranged as each goes out, so a repeat that "
+            "was missed while nothing was running picks up at its next "
+            "occurrence rather than delivering the backlog at once. If a "
+            "reminder cannot be delivered within "
             f"{REMINDER_GRACE_HOURS} hours of the due time it is dropped rather "
-            "than sent uselessly late. The tool result tells you whether it was "
-            "actually scheduled — if it was refused, say so plainly rather than "
-            "implying the reminder exists."
+            "than sent uselessly late. It cannot be edited afterwards, but it "
+            f"can be cancelled: {sender} can ask, and you have "
+            f"{LIST_REMINDERS_TOOL} and {CANCEL_REMINDER_TOOL} for that. The "
+            "tool result tells you whether it was actually scheduled — if it "
+            "was refused, say so plainly rather than implying the reminder "
+            "exists."
         ),
         "input_schema": {
             "type": "object",
@@ -568,8 +1005,12 @@ def reply_reminder_schema(sender: str, now: datetime.datetime | None = None) -> 
                          "description": (
                              "Plain text, no markdown. Write the whole message "
                              "as it should read on the day; nothing is added "
-                             "later, and you won't see it again before it goes."
+                             "later, and you won't see it again before it goes. "
+                             "For a repeating reminder this same text arrives "
+                             "every time, so don't write it as if it were the "
+                             "only one."
                          )},
+                **repeat_properties(),
             },
             "required": ["due_at", "subject", "body"],
         },
@@ -597,6 +1038,139 @@ def handle_reply_reminder(cfg, store, sender: str, payload: dict) -> tuple[str, 
         log.error("Scheduling a reminder for %s failed", sender, exc_info=True)
         return f"The reminder could not be scheduled: {exc}", True
     return outcome, outcome.startswith("refused:")
+
+
+# ---------------------------------------------------------------------------
+# SEEING AND CANCELLING WHAT IS BOOKED
+# ---------------------------------------------------------------------------
+#
+# Scheduling and cancelling are scoped the same way and for the same
+# reason: the recipient is fixed in code to the person being replied to.
+# Neither tool takes an address, so there is nothing for an injected
+# email to point at someone else — "cancel every reminder Steve has" is
+# not a sentence this surface can act on, whoever writes it.
+
+def reply_list_reminders_schema(sender: str) -> dict:
+    return {
+        "name": LIST_REMINDERS_TOOL,
+        "description": (
+            f"List the reminders currently scheduled for {sender}, the person "
+            "you are replying to. Takes no arguments: it can only ever show "
+            "their own, because the address is fixed in code and not "
+            "something you or they can choose. Use it when they ask what is "
+            "booked, when they want to change something — a reminder cannot "
+            "be edited, so that means cancelling and scheduling again — and "
+            f"before {CANCEL_REMINDER_TOOL}, which needs the id this returns."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    }
+
+
+def reply_cancel_reminder_schema(sender: str) -> dict:
+    return {
+        "name": CANCEL_REMINDER_TOOL,
+        "description": (
+            f"Cancel a pending reminder addressed to {sender}. Give the id "
+            f"from {LIST_REMINDERS_TOOL}. If the reminder repeats, the whole "
+            "series is cancelled, not just the next one — that is almost "
+            "always what 'stop reminding me' means, so say plainly in your "
+            "reply that the repeat has stopped. Only their own reminders can "
+            "be cancelled; there is no way to reach anyone else's. Check the "
+            "result before telling them it is done."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "reminder_id": {
+                    "type": "string",
+                    "description": (
+                        f"The id as {LIST_REMINDERS_TOOL} printed it. Don't "
+                        "invent one; list first if you don't have it."
+                    ),
+                },
+            },
+            "required": ["reminder_id"],
+        },
+    }
+
+
+def _own_pending_reminders(store, sender: str) -> list[dict]:
+    """The pending rows this correspondent is allowed to know about.
+
+    The one line that makes both tools safe to offer to anyone Indi
+    replies to. It is a filter on the stored recipient, not a check of
+    anything the model passed in, so there is no argument to get wrong."""
+    return [row for row in pending_reminders(store)
+            if (row.get("recipient") or "").strip().lower() == sender]
+
+
+def handle_reply_list_reminders(cfg, store, sender: str) -> tuple[str, bool]:
+    sender = (sender or "").strip().lower()
+    if store is None:
+        return "Reminders are unavailable: no spreadsheet store on this run.", True
+    if not sender or "@" not in sender:
+        return f"Reminders are unavailable: no usable sender address ({sender!r}).", True
+
+    rows = _own_pending_reminders(store, sender)
+    if not rows:
+        return "Nothing is scheduled for you at the moment.", False
+    lines = [
+        f"{reminder_ref(row)} — due {row.get('due_at', '')} — "
+        f"{(row.get('subject') or 'Reminder')[:80]} — {describe_repeat(row)}"
+        for row in rows
+    ]
+    return (f"{len(lines)} reminder(s) scheduled for {sender}:\n"
+            + "\n".join(lines)), False
+
+
+def handle_reply_cancel_reminder(cfg, store, sender: str,
+                                 payload: dict) -> tuple[str, bool]:
+    """Cancel one of this correspondent's own reminders, series and all."""
+    sender = (sender or "").strip().lower()
+    if store is None:
+        return "Reminders are unavailable: no spreadsheet store on this run.", True
+    if not sender or "@" not in sender:
+        return f"Reminders are unavailable: no usable sender address ({sender!r}).", True
+
+    wanted = str((payload or {}).get("reminder_id") or "").strip().lstrip("#")
+    if not wanted:
+        return ("Cancelling needs the reminder's id — list them first.", True)
+
+    rows = _own_pending_reminders(store, sender)
+    key = wanted.lower()
+    # A bare number is accepted as well as "row12": legacy rows are named
+    # by their sheet row, and a person reading the list back out of an
+    # email will not always copy the prefix.
+    match = next((row for row in rows
+                  if reminder_ref(row).lower() in (key, f"row{key}")), None)
+    if match is None:
+        # Deliberately the same answer whether the id doesn't exist or
+        # belongs to somebody else. There is nothing to learn here about
+        # other people's mail.
+        return (f"You have no pending reminder with the id {wanted!r}.", True)
+
+    series = (match.get("series_id") or "").strip()
+    targets = ([row for row in rows
+                if (row.get("series_id") or "").strip() == series]
+               if series else [match])
+
+    if cfg.dry_run:
+        print(f"\n[dry-run] would cancel {len(targets)} reminder(s) for {sender}\n")
+        return "dry run (nothing cancelled)", False
+
+    for row in targets:
+        # No timestamp: sent_at means what it says, and a cancelled
+        # reminder was never sent. The status is the whole record.
+        _set_reminder_status(store, row, STATUS_CANCELLED)
+    log.info("Cancelled %d reminder(s) for %s.", len(targets), sender)
+
+    repeated = _repeat_of(match) is not None
+    when = match.get("due_at", "")
+    if repeated:
+        return (f"Cancelled the repeating reminder due {when} "
+                f"({describe_repeat(match)}); nothing further in that series "
+                "will be sent."), False
+    return f"Cancelled the reminder due {when}.", False
 
 
 # ---------------------------------------------------------------------------
@@ -629,8 +1203,8 @@ def _context(cfg, store) -> str:
     upcoming = pending_reminders(store)[:10]
     if upcoming:
         parts.append("=== REMINDERS STILL PENDING ===\n" + "\n".join(
-            f"[due {r.get('due_at','')}] to {r.get('recipient','')} — "
-            f"{r.get('subject','')}" for r in upcoming
+            f"[due {r.get('due_at','')}, {describe_repeat(r)}] to "
+            f"{r.get('recipient','')} — {r.get('subject','')}" for r in upcoming
         ))
 
     if not parts:

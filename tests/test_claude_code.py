@@ -15,6 +15,7 @@ file. A Claude Code session can, which is exactly why the gate is worth
 pinning down here.
 """
 
+import subprocess
 import sys
 from pathlib import Path
 
@@ -298,3 +299,228 @@ def test_every_credential_file_is_covered():
     for name in (".env", "token.json", "credentials.json", "api_key.txt"):
         assert name in ignored, name
         assert name in claude_code.UNTRACKED_SENSITIVE, name
+
+
+# --------------------------------------------------------------------------
+# WHAT HAPPENS TO THE SESSION'S WORK
+#
+# A session that committed its own work once came back as "finished
+# without changing any files", and the branch was force-deleted on the
+# strength of an empty index. The work survived only in the reflog. These
+# tests exist so the working tree is never again the only place the run
+# looks for what a session did.
+#
+# Git is not mocked out here. The bug was a git-state bug — which ref has
+# which commits — and a test that stubbed git would have passed happily
+# while the branch went in the bin.
+# --------------------------------------------------------------------------
+
+def _run_git(repo, *args) -> str:
+    return subprocess.run(["git", *args], cwd=str(repo), capture_output=True,
+                          text=True, check=True).stdout.strip()
+
+
+def _branches(repo) -> list[str]:
+    out = _run_git(repo, "branch", "--format=%(refname:short)")
+    return [line.strip() for line in out.splitlines() if line.strip()]
+
+
+def _session_branches(repo) -> list[str]:
+    return [b for b in _branches(repo) if b.startswith("indi/claude/")]
+
+
+def _file_on(repo, ref: str, name: str) -> str:
+    """The contents of a file as of some ref, or "" if it isn't there."""
+    proc = subprocess.run(["git", "show", f"{ref}:{name}"], cwd=str(repo),
+                          capture_output=True, text=True)
+    return proc.stdout if proc.returncode == 0 else ""
+
+
+@pytest.fixture
+def repo(tmp_path):
+    """A one-commit repository standing in for the harness checkout."""
+    root = tmp_path / "harness"
+    root.mkdir()
+    (root / "thing.py").write_text("original\n")
+    _run_git(root, "init", "-q", "-b", "master")
+    _run_git(root, "config", "user.email", "indi@localhost")
+    _run_git(root, "config", "user.name", "Indi Artificial")
+    _run_git(root, "add", "-A")
+    _run_git(root, "commit", "-q", "-m", "Initial harness state")
+    return root
+
+
+def _run_session(monkeypatch, repo, session, *, tests_pass=True, **over):
+    """Drive `claude_code.run` with `session` standing in for the CLI.
+
+    `session` is handed the repo and may do to it whatever a real Claude
+    Code session would: edit files, commit, both, or nothing at all."""
+    def fake_invoke(cfg, task):
+        session(repo)
+        return {"result": "the session's own words"}
+
+    monkeypatch.setattr(claude_code, "_binary", lambda cfg: "/bin/true")
+    monkeypatch.setattr(claude_code, "_invoke", fake_invoke)
+    monkeypatch.setattr(claude_code.self_code, "run_tests",
+                        lambda cfg: (tests_pass, "test output"))
+    cfg = _cfg(base_dir=repo, dry_run=False, **over)
+    return claude_code.run(cfg, {"task": "do the thing", "rationale": "because"})
+
+
+def _edit_and_commit(repo):
+    (repo / "thing.py").write_text("changed by the session\n")
+    _run_git(repo, "add", "-A")
+    _run_git(repo, "commit", "-q", "-m", "The session's own commit")
+
+
+# -- the case that was lost --------------------------------------------
+
+def test_a_session_that_commits_its_own_work_is_not_an_empty_session(
+        monkeypatch, repo):
+    """The exact shape of the loss: clean tree, empty index, real work."""
+    out = _run_session(monkeypatch, repo, _edit_and_commit)
+
+    assert "without changing any files" not in out
+    assert "Applied" in out
+    assert "thing.py" in out
+    assert _file_on(repo, "master", "thing.py") == "changed by the session\n"
+
+
+def test_a_committed_session_never_has_its_branch_deleted(monkeypatch, repo):
+    _run_session(monkeypatch, repo, _edit_and_commit, claude_code_auto_apply=False)
+
+    branches = _session_branches(repo)
+    assert len(branches) == 1, branches
+    assert _file_on(repo, branches[0], "thing.py") == "changed by the session\n"
+
+
+def test_leftovers_are_committed_on_top_of_what_the_session_committed(
+        monkeypatch, repo):
+    """Both halves survive: neither replaces the other."""
+    def session(r):
+        _edit_and_commit(r)
+        (r / "extra.py").write_text("left in the working tree\n")
+
+    out = _run_session(monkeypatch, repo, session)
+
+    assert "Applied" in out
+    assert _file_on(repo, "master", "thing.py") == "changed by the session\n"
+    assert _file_on(repo, "master", "extra.py") == "left in the working tree\n"
+
+
+def test_the_summary_describes_the_branch_not_the_last_commit(monkeypatch, repo):
+    """Two commits, and the report has to mention both files. Summarising
+    the last commit alone would name only the second."""
+    def session(r):
+        (r / "first.py").write_text("one\n")
+        _run_git(r, "add", "-A")
+        _run_git(r, "commit", "-q", "-m", "first")
+        (r / "second.py").write_text("two\n")
+        _run_git(r, "add", "-A")
+        _run_git(r, "commit", "-q", "-m", "second")
+
+    out = _run_session(monkeypatch, repo, session, claude_code_auto_apply=False)
+
+    assert "first.py" in out
+    assert "second.py" in out
+
+
+def test_a_failing_suite_leaves_committed_work_on_its_branch(monkeypatch, repo):
+    out = _run_session(monkeypatch, repo, _edit_and_commit, tests_pass=False)
+
+    assert "FAILED" in out
+    assert "thing.py" in out
+    branches = _session_branches(repo)
+    assert len(branches) == 1, branches
+    assert _file_on(repo, branches[0], "thing.py") == "changed by the session\n"
+    # And master is untouched, as it always was on red.
+    assert _file_on(repo, "master", "thing.py") == "original\n"
+
+
+def test_a_session_that_crashes_after_committing_keeps_its_branch(
+        monkeypatch, repo):
+    """Timing out is not the same as having done nothing."""
+    def session(r):
+        _edit_and_commit(r)
+        raise RuntimeError("the session timed out")
+
+    monkeypatch.setattr(claude_code, "_binary", lambda cfg: "/bin/true")
+    monkeypatch.setattr(claude_code, "_invoke",
+                        lambda cfg, task: session(repo))
+    with pytest.raises(RuntimeError):
+        claude_code.run(_cfg(base_dir=repo, dry_run=False),
+                        {"task": "t", "rationale": "r"})
+
+    branches = _session_branches(repo)
+    assert len(branches) == 1, branches
+    assert _file_on(repo, branches[0], "thing.py") == "changed by the session\n"
+    assert _run_git(repo, "rev-parse", "--abbrev-ref", "HEAD") == "master"
+
+
+# -- the behaviour that was already right ------------------------------
+
+def test_an_uncommitted_session_still_works_exactly_as_it_did(
+        monkeypatch, repo):
+    """The common case: the session edits files and leaves them."""
+    out = _run_session(monkeypatch, repo,
+                       lambda r: (r / "thing.py").write_text("edited\n"))
+
+    assert "Applied" in out
+    assert "thing.py" in out
+    assert _file_on(repo, "master", "thing.py") == "edited\n"
+
+
+def test_a_genuinely_empty_session_still_tidies_its_branch_away(
+        monkeypatch, repo):
+    """The one case where `branch -D` is still right, and still happens:
+    nothing staged, nothing committed, nothing to lose."""
+    out = _run_session(monkeypatch, repo, lambda r: None)
+
+    assert "without changing any files" in out
+    assert _session_branches(repo) == []
+
+
+def test_a_crashed_empty_session_still_tidies_its_branch_away(
+        monkeypatch, repo):
+    def blow_up(cfg, task):
+        raise RuntimeError("no")
+
+    monkeypatch.setattr(claude_code, "_binary", lambda cfg: "/bin/true")
+    monkeypatch.setattr(claude_code, "_invoke", blow_up)
+    with pytest.raises(RuntimeError):
+        claude_code.run(_cfg(base_dir=repo, dry_run=False),
+                        {"task": "t", "rationale": "r"})
+
+    assert _session_branches(repo) == []
+
+
+def test_auto_apply_off_still_parks_the_branch(monkeypatch, repo):
+    out = _run_session(monkeypatch, repo,
+                       lambda r: (r / "thing.py").write_text("edited\n"),
+                       claude_code_auto_apply=False)
+
+    assert "Auto-apply is off" in out
+    assert len(_session_branches(repo)) == 1
+    assert _file_on(repo, "master", "thing.py") == "original\n"
+
+
+# -- the count itself --------------------------------------------------
+
+def test_commits_ahead_counts_what_the_branch_added(repo):
+    cfg = _cfg(base_dir=repo)
+    _run_git(repo, "checkout", "-q", "-b", "indi/claude/test")
+    assert claude_code._commits_ahead(cfg, "master") == 0
+    _edit_and_commit(repo)
+    assert claude_code._commits_ahead(cfg, "master") == 1
+    # And by name as well as through HEAD, which is what makes a session
+    # that wandered off its own branch still countable.
+    _run_git(repo, "checkout", "-q", "master")
+    assert claude_code._commits_ahead(cfg, "master") == 0
+    assert claude_code._commits_ahead(cfg, "master", "indi/claude/test") == 1
+
+
+def test_an_uncountable_ref_is_assumed_to_hold_work(repo):
+    """The answer that decides whether a branch gets deleted fails safe:
+    git being unable to count is not evidence that there is nothing
+    there."""
+    assert claude_code._commits_ahead(_cfg(base_dir=repo), "no-such-ref") == 1

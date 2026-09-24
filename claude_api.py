@@ -162,6 +162,13 @@ def history_search_schema(scoped_to_sender: bool) -> dict:
         "replying to."
         if scoped_to_sender else ""
     )
+    # TODO(MIGRATE-GMAIL.md, step 5): rewrite this description when the
+    # search reader flips to Gmail. It describes the Sheets search, which is
+    # still the one answering (the Gmail search only runs as a shadow, step
+    # 3). Gmail tokenises — "auth" will no longer find "authentication" —
+    # and it adds from:, subject:, newer_than: and negation. Change it
+    # before step 5, not after, or the model writes substring queries that
+    # silently return nothing.
     return {
         "name": HISTORY_SEARCH_TOOL_NAME,
         "description": (

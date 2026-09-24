@@ -4,7 +4,8 @@ The Queue and Responses spreadsheets duplicate data Gmail already holds.
 This is a sketch of what it takes to drop them, what genuinely can't move,
 and the three places where a naive port breaks something quietly.
 
-Nothing here is implemented yet.
+Steps 0 and 1 of the order of work below are done; the cutover itself
+has not started.
 
 ## What moves where
 
@@ -78,6 +79,21 @@ Fix this *before* the store changes, as its own step: replace the count
 with the `received_at` of the last folded message, or a set of folded
 `gmail_msg_id`s. Then the offset can't drift when the source changes.
 
+*Done (step 1).* The header is now v2 and names the folded messages:
+
+    # indi-memory v2 | sender: alice@example.com | folded_ids: 18c1…,18c2… | updated: 2026-09-24T10:49:14+00:00
+
+`folded_ids` is a comma-separated, sorted set of Gmail message ids (empty
+for none). An id set rather than a timestamp because it is exact: no tie
+rule, and a retried message whose `received_at` is older than the last
+fold is still pending instead of silently skipped. v1 files (`folded: N`)
+are still read; N is resolved against the current `messages_for_sender()`
+ordering into the ids of `rows[:N]` — exactly what the old slice treated
+as folded — and the next consolidation writes v2. A headerless file is
+folded-nothing, as before. Every deployed file has to go through one
+consolidation *on the Sheets store* before step 5 flips the reader, or
+its v1 count will be resolved against a different ordering.
+
 **3. Gmail matches words, not substrings.** The current search is
 `q in subject+body` — `"auth"` finds `"authentication"`. Gmail tokenises,
 so it won't. The tool description promises substring matching
@@ -111,14 +127,21 @@ limit.
 
 ## Order of work
 
-**0. Write tests for the store first.** The current 53 are security
+**0. Write tests for the store first.** *Done:* `tests/test_store.py`
+pins the store's contract — status machine, `messages_for_sender`,
+`responses_by_message`, the exact 24h cutoff, `known_correspondents`, and
+that a sender-scoped search can't return anyone else's mail whatever the
+query holds. Backend details live in its fake and `_store` helper, which
+is the part to replace for Gmail. Original note: the current 53 are security
 guards and import smoke tests — `grep store tests/` returns nothing. The
 thing being rewritten has no coverage, and `INDI_SELF_CODE_TEST_COMMAND`
 gates Indi's own self-modification on that suite. Rewriting the store
 under a suite that can't see it is the largest risk in this plan.
 
 1. Fix `folded` to a stable marker. Independent of everything else, and
-   the migration is unsafe until it's done.
+   the migration is unsafe until it's done. *Done:* v2 header with
+   `folded_ids`; see "`folded` is a positional offset" above and
+   `tests/test_memory_watermark.py`.
 2. Add labels alongside the sheet. Write both, read from the sheet.
    Backfill labels from existing Queue rows in a one-off pass.
 3. Build the Gmail-backed readers — search, `replies_in_last_day`,

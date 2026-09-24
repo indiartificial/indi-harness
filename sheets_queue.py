@@ -38,6 +38,8 @@ import datetime
 import logging
 import re
 
+import gmail_io
+
 log = logging.getLogger("indi.sheets")
 
 QUEUE_TITLE = "Indi Queue"
@@ -64,6 +66,18 @@ STATUS_FAILED = "failed"     # an error occurred; eligible for retry
 STATUS_IGNORED = "ignored"   # Indi read it and chose not to reply
 
 TERMINAL_STATUSES = {STATUS_REPLIED, STATUS_SKIPPED, STATUS_IGNORED}
+
+# The Gmail label mirroring each status (MIGRATE-GMAIL.md, step 2). The
+# sheet is still the record: these are written beside it, exactly one per
+# message, and nothing reads them yet. They exist so that by the time a
+# reader moves over, every message already carries the right one.
+STATUS_LABELS = {
+    STATUS_QUEUED: "Indi/Queued",
+    STATUS_REPLIED: "Indi/Replied",
+    STATUS_SKIPPED: "Indi/Skipped",
+    STATUS_FAILED: "Indi/Failed",
+    STATUS_IGNORED: "Indi/Ignored",
+}
 
 # Indi's own outbound-initiated messages and its journal entries. Both are
 # separate tabs in the Responses spreadsheet so the reply pipeline and the
@@ -106,10 +120,16 @@ def _col_letter(index_zero_based: int) -> str:
 
 
 class SheetStore:
-    def __init__(self, sheets_service, drive_service, cfg):
+    def __init__(self, sheets_service, drive_service, cfg, gmail_service=None):
         self.sheets = sheets_service
         self.drive = drive_service
         self.cfg = cfg
+        # Given a Gmail client, every status write also sets the matching
+        # Indi/* label. Without one (the default, and what the caller
+        # passes when INDI_GMAIL_STATUS_LABELS is off) the store behaves
+        # exactly as it did before labels existed.
+        self._labeler = (gmail_io.StatusLabeler(gmail_service)
+                         if gmail_service is not None else None)
         self.queue_id: str | None = None
         self.responses_id: str | None = None
         self._cache: dict[str, list[dict]] = {}
@@ -338,6 +358,7 @@ class SheetStore:
         }
         row_number = self._append(self.queue_id, QUEUE_TAB, QUEUE_HEADERS, record)
         record["_row"] = row_number
+        self._label_status(record["gmail_msg_id"], status)
         return record
 
     def set_status(self, queue_row: dict, status: str, note: str = "") -> None:
@@ -357,6 +378,26 @@ class SheetStore:
             valueInputOption="RAW",
             body={"values": [[status, (note or queue_row.get("note", ""))[:500]]]},
         ).execute()
+        self._label_status(queue_row.get("gmail_msg_id", ""), status)
+
+    def _label_status(self, gmail_msg_id: str, status: str) -> None:
+        """Mirror a status the sheet has just recorded onto the message.
+
+        Strictly best-effort. It runs only after the sheet write has
+        succeeded, so a label is never ahead of the record, and every
+        failure — Gmail down, a message deleted since, a label that
+        couldn't be created — is logged and dropped here. Nothing reads
+        these labels yet, so a missing one costs nothing; letting one
+        raise would turn bookkeeping into a failed reply.
+        """
+        name = STATUS_LABELS.get(status)
+        if self._labeler is None or not gmail_msg_id or name is None:
+            return
+        try:
+            self._labeler.apply(gmail_msg_id, name, STATUS_LABELS.values())
+        except Exception:
+            log.warning("Could not set label %s on %s; the sheet has the "
+                        "status regardless.", name, gmail_msg_id, exc_info=True)
 
     def set_attachments(self, queue_row: dict, paths: list[str]) -> None:
         """Record which stored attachments belong to this message.

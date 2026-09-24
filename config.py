@@ -273,6 +273,7 @@ class Config:
 
     # --- storage ---
     max_body_chars: int
+    gmail_status_labels: bool
 
     # --- initiative (heartbeat runs) ---
     enable_outbound: bool
@@ -399,6 +400,10 @@ class Config:
             # Google Sheets rejects any cell over 50,000 characters. Staying
             # well under that means one long email can't abort the run.
             max_body_chars=_int("INDI_MAX_BODY_CHARS", 45000),
+            # Mirror each queue status onto the message as an Indi/* label
+            # (MIGRATE-GMAIL.md, step 2). On by default because it only
+            # writes and never fails a run; off removes it entirely.
+            gmail_status_labels=_bool("INDI_GMAIL_STATUS_LABELS", True),
             enable_outbound=_bool("INDI_ENABLE_OUTBOUND", True),
             outbound_max_per_day=_int("INDI_OUTBOUND_MAX_PER_DAY", 5),
             outbound_max_per_recipient_per_day=_int(

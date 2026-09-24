@@ -629,3 +629,68 @@ def build_reply_mime(to_addr: str, subject: str, body: str, in_reply_to: str,
 
     raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
     return {"raw": raw}
+
+
+# ---------------------------------------------------------------------------
+# STATUS LABELS  (MIGRATE-GMAIL.md, step 2)
+# ---------------------------------------------------------------------------
+
+class StatusLabeler:
+    """Puts exactly one of a family of labels on a message.
+
+    Which label means what is the store's business (`sheets_queue` holds
+    the status -> label mapping); this class only knows how to make Gmail
+    agree. Label ids are looked up once per run with a single
+    `labels.list` and cached, so a run that labels ten messages makes one
+    lookup, not ten. A label that doesn't exist yet is created the first
+    time something needs to be *given* it. One that only needs to be
+    *removed* is never created — a label that doesn't exist can't be on
+    the message.
+
+    Nothing here swallows errors. Whether a failure matters is the
+    caller's decision, and for the store it doesn't: see
+    `SheetStore._label_status`.
+    """
+
+    def __init__(self, gmail):
+        self.gmail = gmail
+        self._ids: dict[str, str] | None = None
+
+    def _label_ids(self) -> dict[str, str]:
+        if self._ids is None:
+            listed = self.gmail.users().labels().list(userId="me").execute()
+            self._ids = {lab["name"]: lab["id"] for lab in listed.get("labels", [])}
+        return self._ids
+
+    def existing_id(self, name: str) -> str | None:
+        """The label's id, or None if the mailbox has no such label. Never
+        creates anything, which is what a dry run needs."""
+        return self._label_ids().get(name)
+
+    def ensure_id(self, name: str) -> str:
+        found = self.existing_id(name)
+        if found:
+            return found
+        try:
+            created = self.gmail.users().labels().create(
+                userId="me",
+                body={"name": name, "labelListVisibility": "labelShow",
+                      "messageListVisibility": "show"},
+            ).execute()
+        except Exception:
+            # Most likely another run created it since we listed. Forget
+            # the cache so the next call lists again instead of retrying
+            # a create that will keep failing.
+            self._ids = None
+            raise
+        self._ids[name] = created["id"]
+        return created["id"]
+
+    def apply(self, gmail_msg_id: str, name: str, others) -> None:
+        """Add `name` to the message and remove every label in `others`."""
+        add = self.ensure_id(name)
+        remove = [i for i in (self.existing_id(o) for o in others if o != name) if i]
+        self.gmail.users().messages().modify(
+            userId="me", id=gmail_msg_id,
+            body={"addLabelIds": [add], "removeLabelIds": remove},
+        ).execute()

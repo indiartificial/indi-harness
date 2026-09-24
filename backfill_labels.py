@@ -38,18 +38,36 @@ What it takes care over:
     can't change a status between this reading the row and labelling
     the message — which would leave the label saying something the
     sheet doesn't.
+
+  * **It says what it read.** A pass that finds no messages, or finds
+    rows whose `gmail_msg_id` doesn't look like a Gmail message id, is
+    almost always reading a different spreadsheet or a Queue tab whose
+    columns aren't where `QUEUE_HEADERS` says they are — not a mailbox
+    with nothing in it. So the run prints the spreadsheet id, the header
+    row as the sheet spells it, the row count, and a warning if more
+    than one Drive file carries the Queue title. Those are all reads.
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
+import re
 import sys
 
 import gmail_io
 import sheets_queue
 
 log = logging.getLogger("indi.backfill")
+
+# Gmail message ids are hex strings, comfortably longer than this. The test
+# is deliberately loose: it exists to catch a row whose first column holds
+# something like "gmail_msg_id" or an email address, not to validate ids.
+_LOOKS_LIKE_MSG_ID = re.compile(r"^[0-9a-f]{8,}$", re.IGNORECASE)
+
+
+def _stderr(message: str) -> None:
+    print(message, file=sys.stderr)
 
 
 def _is_not_found(exc: Exception) -> bool:
@@ -58,12 +76,17 @@ def _is_not_found(exc: Exception) -> bool:
     return getattr(getattr(exc, "resp", None), "status", None) == 404
 
 
-def backfill(gmail, rows: list[dict], apply: bool = False, out=print) -> dict:
+def backfill(gmail, rows: list[dict], apply: bool = False, out=print,
+             warn=_stderr) -> dict:
     """Label each row's message to match its status. Returns counts.
 
     Rows are taken in sheet order and only the first row for a given
     message id is used, which is the one `find_queue_row` — and so every
     status write — acts on.
+
+    `warn` receives shape complaints about the rows themselves; they go
+    to stderr rather than through `out` so they can't be mistaken for
+    per-message results.
     """
     labeler = gmail_io.StatusLabeler(gmail)
     all_names = list(sheets_queue.STATUS_LABELS.values())
@@ -80,6 +103,16 @@ def backfill(gmail, rows: list[dict], apply: bool = False, out=print) -> dict:
 
     verb = "Labelling" if apply else "Dry run — checking"
     out(f"{verb} {len(todo)} message(s) from the Queue sheet.")
+
+    odd = [m for m, _ in todo if not _LOOKS_LIKE_MSG_ID.match(m)]
+    if todo and len(odd) == len(todo):
+        warn("WARNING: none of these look like Gmail message ids "
+             f"(first: {todo[0][0]!r}). The Queue tab's columns are probably "
+             "not where QUEUE_HEADERS expects them, or this is not the Queue "
+             "spreadsheet the harness writes to. Nothing here will label.")
+    elif odd:
+        warn(f"WARNING: {len(odd)} of {len(todo)} row(s) have a gmail_msg_id "
+             f"that doesn't look like one (e.g. {odd[0]!r}).")
 
     for n, (msg_id, status) in enumerate(todo, start=1):
         prefix = f"[{n}/{len(todo)}] {msg_id}"
@@ -123,6 +156,55 @@ def backfill(gmail, rows: list[dict], apply: bool = False, out=print) -> dict:
     return counts
 
 
+def _report_source(drive, store) -> None:
+    """Say which spreadsheet is about to be read, and how it is shaped.
+
+    Read-only. `_find_spreadsheet` picks the first of any duplicates and
+    only logs about it; a terminal run deserves to see that on screen,
+    because a forked history is the one failure here that looks like
+    success.
+    """
+    title = sheets_queue.QUEUE_TITLE
+    try:
+        files = (
+            drive.files()
+            .list(
+                q=(f"name = '{sheets_queue._escape_drive_query(title)}' and "
+                   "mimeType = 'application/vnd.google-apps.spreadsheet' and "
+                   "trashed = false"),
+                spaces="drive",
+                fields="files(id, name, modifiedTime)",
+            )
+            .execute()
+            .get("files", [])
+        )
+    except Exception:
+        log.warning("Could not list spreadsheets named %r", title, exc_info=True)
+        files = []
+    if len(files) > 1:
+        _stderr(f"WARNING: {len(files)} spreadsheets are named {title!r}:")
+        for f in files:
+            _stderr(f"  {f.get('id')}  modified {f.get('modifiedTime', '?')}")
+        _stderr("  Using the first. Duplicates fork the history — remove them "
+                "before trusting this run.")
+
+    try:
+        headers = store.tab_headers(store.queue_id, sheets_queue.QUEUE_TAB)
+        rows = store.queue_rows()
+    except Exception:
+        log.warning("Could not read the %s tab", sheets_queue.QUEUE_TAB,
+                    exc_info=True)
+        return
+    print(f"Queue spreadsheet {store.queue_id}, tab {sheets_queue.QUEUE_TAB}: "
+          f"{len(rows)} data row(s).")
+    print("Header row as the sheet holds it: "
+          + (", ".join(headers) if headers else "(empty)"))
+    if headers and headers[: len(sheets_queue.QUEUE_HEADERS)] != sheets_queue.QUEUE_HEADERS:
+        _stderr("WARNING: that header row is not the one QUEUE_HEADERS "
+                "declares. Every column is read by name, so a row's values "
+                "will be attributed to the wrong fields.")
+
+
 def parse_args(argv=None):
     p = argparse.ArgumentParser(
         description="One-off: label existing Queue messages with their Indi/* status.")
@@ -160,6 +242,7 @@ def main(argv=None) -> int:
         if not store.queue_id:
             print(f"No spreadsheet named {sheets_queue.QUEUE_TITLE!r}; nothing to backfill.")
             return 1
+        _report_source(drive, store)
         counts = backfill(gmail, store.queue_rows(), apply=args.apply)
         return 1 if counts["errors"] else 0
     finally:

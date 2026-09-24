@@ -6,10 +6,13 @@ One-off: give every message already in the Queue sheet the Indi/* label
 matching its status (MIGRATE-GMAIL.md, step 2). New status writes label
 themselves; this catches up the history written before they did.
 
-Run it deliberately, from a terminal:
+Run it deliberately, from a terminal, with the venv interpreter — the
+Google client stack is not installed system-wide, so a bare `python3`
+dies at `import googleapiclient` before anything happens:
 
-    python backfill_labels.py            # dry run: report, change nothing
-    python backfill_labels.py --apply    # actually label
+    cd ~/harness
+    /home/indi/venv/bin/python backfill_labels.py            # dry run: report, change nothing
+    /home/indi/venv/bin/python backfill_labels.py --apply    # actually label
 
 Nothing in the poll or the heartbeat imports this. It is a migration
 step, not a routine, and it should happen once, when someone is watching.
@@ -131,7 +134,8 @@ def parse_args(argv=None):
 def main(argv=None) -> int:
     args = parse_args(argv)
     # Imported here so `backfill` can be tested without the Google client
-    # stack, as drive_backup.py does.
+    # stack, as drive_backup.py does. If this raises ModuleNotFoundError,
+    # the script is being run outside the venv — see the usage note above.
     from googleapiclient.discovery import build
 
     import check_and_reply

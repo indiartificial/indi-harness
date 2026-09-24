@@ -893,7 +893,10 @@ def main() -> int:
                      "(web fetch, code execution, cross-sender history) are off "
                      "for everyone.")
 
-        store = sheets_queue.SheetStore(sheets, drive, cfg)
+        store = sheets_queue.SheetStore(
+            sheets, drive, cfg,
+            gmail_service=gmail if cfg.gmail_status_labels else None,
+        )
         store.ensure_spreadsheets()
 
         # Who has accepted the terms. Local, and read-only under

@@ -4,8 +4,8 @@ The Queue and Responses spreadsheets duplicate data Gmail already holds.
 This is a sketch of what it takes to drop them, what genuinely can't move,
 and the three places where a naive port breaks something quietly.
 
-Steps 0 and 1 of the order of work below are done; the cutover itself
-has not started.
+Steps 0, 1 and 2 of the order of work below are done; the cutover itself
+has not started. Every reader still reads the sheet.
 
 ## What moves where
 
@@ -13,7 +13,7 @@ has not started.
 |---|---|
 | Queue: `gmail_msg_id`, `thread_id`, `sender`, `sender_addr`, `subject`, `body`, `received_at` | Gmail. Already there; we were copying it. |
 | Queue: `status` | Gmail labels (`Indi/Replied`, `Indi/Skipped`, …) |
-| Queue: `note` | **No equivalent.** See below. |
+| Queue: `note` | Journal file on Drive, keyed by `gmail_msg_id` (settled; see below) |
 | Responses: `response_text`, `created_at` | Gmail Sent / Drafts |
 | Outbound: `recipient`, `subject`, `body` | Gmail Sent |
 | Outbound: `rationale` | Drive file — *why* Indi wrote is not in the mailbox |
@@ -21,7 +21,9 @@ has not started.
 
 Journal and Outbound move to append-only files on Drive via the helpers
 already in `memory_file.py`, not to a smaller spreadsheet. That's what lets
-the `spreadsheets` scope go; keeping any Sheet keeps the scope.
+the `spreadsheets` scope go; keeping any Sheet keeps the scope. *Settled:*
+they stay on Drive and do **not** fold into Gmail, deliberately — see
+"The independent record" at the end.
 
 Final scopes: `gmail.modify` + `drive.file`.
 
@@ -49,6 +51,10 @@ Three options, in order of preference:
    `Indi/Skipped/Automated`). Loses the free text.
 3. Drop it and rely on `log.txt`. Cheapest, and the log already records
    every one of these lines — but the log rotates and the label doesn't.
+
+*Settled: option 1.* `note` goes to the Journal file, keyed by
+`gmail_msg_id`. That move happens with the Journal's own at step 6; until
+then `note` stays in the Queue sheet, where it is now.
 
 ## Three things that break quietly
 
@@ -144,6 +150,17 @@ under a suite that can't see it is the largest risk in this plan.
    `tests/test_memory_watermark.py`.
 2. Add labels alongside the sheet. Write both, read from the sheet.
    Backfill labels from existing Queue rows in a one-off pass.
+   *Done:* `SheetStore.set_status` and `append_queue_row` set the
+   matching `Indi/*` label and remove the other four, after the sheet
+   write succeeds (`STATUS_LABELS` in `sheets_queue.py`,
+   `gmail_io.StatusLabeler`). Best-effort: any Gmail failure is logged
+   and dropped, and the store's behaviour is otherwise unchanged. Off
+   with `INDI_GMAIL_STATUS_LABELS=false`. Nothing reads the labels yet.
+   The backfill is `backfill_labels.py`, run by hand — dry run by
+   default, `--apply` to label; it skips messages already correct or no
+   longer in the mailbox, so it can be re-run. Tests:
+   `tests/test_status_labels.py`. **Run the backfill with `--apply` once
+   before step 3**, or the Gmail readers will see unlabelled history.
 3. Build the Gmail-backed readers — search, `replies_in_last_day`,
    `known_correspondents` — behind a config flag, still reading the sheet
    for real decisions. Log where the two disagree.
@@ -156,7 +173,7 @@ Steps 2–5 exist because the store is Indi's memory. A hard cutover that
 gets the label backfill wrong doesn't throw — it just makes Indi forget
 people, and the heartbeat will cheerfully journal about it.
 
-## The thing worth arguing about
+## The independent record
 
 The Sheets are an audit surface. They're readable without a client, they
 sit outside the mailbox Indi acts on, and they record *why* — `note`,
@@ -164,11 +181,12 @@ sit outside the mailbox Indi acts on, and they record *why* — `note`,
 
 Indi currently self-modifies with auto-apply and sends without review,
 and holds `gmail.modify`, which permits trashing messages. No code path
-does that, but the scope allows it. Folding the record into Gmail means
-the agent's memory and the agent's workspace become the same mutable
+does that, but the scope allows it. Folding the record into Gmail would
+make the agent's memory and the agent's workspace the same mutable
 store, with no independent copy.
 
-Keeping the Journal and Outbound rationale on Drive preserves most of
-this. Whether that's enough is a judgement call about how much
-independent record you want, not a technical question — and it's the
-part of this plan I'd want your answer on before writing any code.
+*Settled (project owner):* the Journal and the outbound rationale stay
+as Drive files, not in Gmail, deliberately, to keep an independent audit
+surface outside the mailbox Indi acts on. `note` joins them in the
+Journal (option 1 above). The mailbox holds what was said; Drive holds
+why.

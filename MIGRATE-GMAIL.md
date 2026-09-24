@@ -4,8 +4,9 @@ The Queue and Responses spreadsheets duplicate data Gmail already holds.
 This is a sketch of what it takes to drop them, what genuinely can't move,
 and the three places where a naive port breaks something quietly.
 
-Steps 0, 1 and 2 of the order of work below are done; the cutover itself
-has not started. Every reader still reads the sheet.
+Steps 0, 1, 2 and 3 of the order of work below are done; the cutover
+itself has not started. Every reader still reads the sheet — the Gmail
+readers of step 3 only run in its shadow and log disagreements.
 
 ## What moves where
 
@@ -103,8 +104,11 @@ its v1 count will be resolved against a different ordering.
 **3. Gmail matches words, not substrings.** The current search is
 `q in subject+body` — `"auth"` finds `"authentication"`. Gmail tokenises,
 so it won't. The tool description promises substring matching
-(`claude_api.py:102`) and would need rewriting, or the model will write
-queries that silently return nothing. Mostly this is an upgrade — Gmail
+(`history_search_schema` in `claude_api.py`) and would need rewriting, or
+the model will write queries that silently return nothing. *Deferred to
+step 5:* there is a `TODO(MIGRATE-GMAIL.md, step 5)` beside the
+description. It must keep describing the Sheets search while the sheet
+answers, and must change in the same step that flips the reader. Mostly this is an upgrade — Gmail
 brings `from:`, `newer_than:`, `subject:`, negation, none of which exist
 today — but it is not a superset of current behaviour.
 
@@ -164,6 +168,47 @@ under a suite that can't see it is the largest risk in this plan.
 3. Build the Gmail-backed readers — search, `replies_in_last_day`,
    `known_correspondents` — behind a config flag, still reading the sheet
    for real decisions. Log where the two disagree.
+   *Done:* `gmail_reads.py`. With `INDI_GMAIL_SHADOW_READS=true` (default
+   false) `SheetStore.search`, `replies_in_last_day` and
+   `known_correspondents` compute and return their sheet answer exactly as
+   before, then hand it to a `ShadowReader` that asks Gmail and logs any
+   difference at WARNING — the inputs, both answers as ids or counts, and
+   bounded set differences, never bodies. Every Gmail exception is caught
+   and logged there. What each reader does:
+   - search: `from:X {label:indi-…}` plus the model's query, sent to
+     Gmail; every returned message is then re-checked in Python for an
+     Indi/* label and, when scoped, for a From holding exactly one
+     address whose addr-spec (case-folded) is the correspondent's. Ids
+     only, `format=metadata`, at most 25 gets.
+   - `replies_in_last_day`: `in:sent to:X newer_than:2d`, cut at the
+     exact rolling 24h against `internalDate` in Python, inclusive.
+   - `known_correspondents`: senders of messages labelled `Indi/Replied`
+     or `Indi/Ignored` (the statuses the sheet counts — not Skipped,
+     Failed or Queued), plus To/Cc of mail sent at or after
+     `INDI_START_DATE`. Without a start date Sent is left out entirely.
+   Call counts are bounded and documented at the top of the module. Tests:
+   `tests/test_gmail_reads.py`, against a fake Gmail that deliberately
+   ignores `q` and returns the whole mailbox, so the scope tests pass only
+   because the Python filter holds.
+
+   Not yet done, and it matters for step 4: **`backfill_labels.py --apply`
+   has not been run.** Until it is, historic messages carry no Indi/*
+   label, so the Gmail search and `known_correspondents` will under-report
+   against the sheet. Those disagreements are the backfill's, not the
+   readers'. Other differences to expect rather than chase:
+   - search: Gmail matches words, not substrings (see above), and the
+     sheet holds bodies truncated at `INDI_MAX_BODY_CHARS`.
+   - `replies_in_last_day`: Gmail counts everything *sent* to X —
+     heartbeat mail included — while the sheet counts reply rows. With
+     `INDI_SEND_AUTOMATICALLY=false` replies are drafts, not sent, so
+     Gmail will say 0 where the sheet counts them. Decide which is the
+     right rate limit before step 5.
+   - `known_correspondents`: the start date, once set, adds anyone mailed
+     from the account since then, which the sheet never saw.
+
+   Until config.py grows the settings, the flag and `INDI_START_DATE` are
+   read by `gmail_reads.py` through `config._env`, as outbound.py does for
+   `INDI_HEARTBEAT_MODEL`.
 4. Watch the disagreements for a few days of real mail.
 5. Flip the flag. Keep writing the sheet.
 6. Move Journal and Outbound to Drive files.

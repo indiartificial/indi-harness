@@ -78,6 +78,7 @@ import claude_code
 import correspondents
 import costs
 import gmail_io
+import gmail_reads
 import local_tools
 import locking
 import memory_file
@@ -896,6 +897,10 @@ def main() -> int:
         store = sheets_queue.SheetStore(
             sheets, drive, cfg,
             gmail_service=gmail if cfg.gmail_status_labels else None,
+            # Comparison logging only (MIGRATE-GMAIL.md, step 3); off by
+            # default, and the sheet still answers every read either way.
+            shadow_gmail_service=(gmail if gmail_reads.shadow_reads_enabled(cfg)
+                                  else None),
         )
         store.ensure_spreadsheets()
 

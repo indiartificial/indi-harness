@@ -39,6 +39,7 @@ import logging
 import re
 
 import gmail_io
+import gmail_reads
 
 log = logging.getLogger("indi.sheets")
 
@@ -120,7 +121,8 @@ def _col_letter(index_zero_based: int) -> str:
 
 
 class SheetStore:
-    def __init__(self, sheets_service, drive_service, cfg, gmail_service=None):
+    def __init__(self, sheets_service, drive_service, cfg, gmail_service=None,
+                 shadow_gmail_service=None):
         self.sheets = sheets_service
         self.drive = drive_service
         self.cfg = cfg
@@ -130,6 +132,14 @@ class SheetStore:
         # exactly as it did before labels existed.
         self._labeler = (gmail_io.StatusLabeler(gmail_service)
                          if gmail_service is not None else None)
+        # Given a Gmail client here (the caller passes one only when
+        # INDI_GMAIL_SHADOW_READS is on), search, replies_in_last_day and
+        # known_correspondents also ask Gmail the same question and log
+        # where it disagrees (MIGRATE-GMAIL.md, step 3). The sheet's
+        # answer is still the one returned; see gmail_reads.py.
+        self._shadow = (gmail_reads.ShadowReader(shadow_gmail_service,
+                                                 gmail_reads.start_date(cfg))
+                        if shadow_gmail_service is not None else None)
         self.queue_id: str | None = None
         self.responses_id: str | None = None
         self._cache: dict[str, list[dict]] = {}
@@ -457,7 +467,8 @@ class SheetStore:
         return rows
 
     def replies_in_last_day(self, sender_addr: str) -> int:
-        cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=1)
+        now = datetime.datetime.now(datetime.timezone.utc)
+        cutoff = now - datetime.timedelta(days=1)
         count = 0
         for row in self.response_rows():
             if row.get("sender_addr", "").lower() != sender_addr.lower():
@@ -470,6 +481,8 @@ class SheetStore:
                 created = created.replace(tzinfo=datetime.timezone.utc)
             if created >= cutoff:
                 count += 1
+        if self._shadow is not None:
+            self._shadow.compare_replies_in_last_day(count, sender_addr, now)
         return count
 
     def search(self, query: str = "", sender: str = "", limit: int = 5,
@@ -497,6 +510,9 @@ class SheetStore:
 
         matches.sort(key=lambda r: r.get("received_at", ""), reverse=True)
         matches = matches[: max(1, limit)]
+        if self._shadow is not None:
+            self._shadow.compare_search([m.get("gmail_msg_id") for m in matches],
+                                        query, sender, limit, restrict_to_sender)
         if not matches:
             return []
 
@@ -616,6 +632,8 @@ def _outbound_methods():
             addr = row.get("recipient", "").strip().lower()
             if addr:
                 out.add(addr)
+        if self._shadow is not None:
+            self._shadow.compare_known_correspondents(set(out))
         return out
 
     for fn in (outbound_rows, journal_rows, append_outbound, append_journal,

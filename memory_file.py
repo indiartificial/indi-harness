@@ -34,10 +34,19 @@ Three substantive changes from the previous version:
    unaffected — it still folds everything, because the memory file has to
    end up complete regardless of what one reply happened to show.
 
-The watermark (`folded:` in the file header) records how many of that
-sender's messages have already been folded in, so "what's not in memory
-yet" is derived from state rather than from `id % batch_size == 0`
-arithmetic that breaks the moment ids skip or a message fails.
+The watermark in the file header records which of that sender's messages
+have already been folded in, so "what's not in memory yet" is derived from
+state rather than from `id % batch_size == 0` arithmetic that breaks the
+moment ids skip or a message fails.
+
+It is a set of Gmail message ids (`folded_ids:` in a v2 header), not a
+count. The v1 header stored `folded: N` and sliced `rows[N:]` off
+`messages_for_sender()` — an offset into a list, which silently misaligns
+the moment that list changes shape: a retried message that lands before
+the offset, or the store moving from Sheets to Gmail. An id says which
+message it means whatever order the store returns them in. A v1 file is
+still read: its count is resolved against the store's current ordering,
+once, into the equivalent id set, and the next consolidation writes v2.
 """
 
 from __future__ import annotations
@@ -58,6 +67,13 @@ MEMORY_MIME_TYPE = "text/plain"
 _HEADER_RE = re.compile(
     r"^#\s*indi-memory\s+v1\s*\|\s*sender:\s*(?P<sender>\S*)\s*\|\s*"
     r"folded:\s*(?P<folded>\d+)",
+    re.IGNORECASE,
+)
+# Gmail ids are hex, so neither the comma separator nor the `|` that ends
+# the field can appear inside one. An empty field is a valid, empty set.
+_HEADER_V2_RE = re.compile(
+    r"^#\s*indi-memory\s+v2\s*\|\s*sender:\s*(?P<sender>\S*)\s*\|\s*"
+    r"folded_ids:\s*(?P<ids>[^|]*?)\s*(?:\||$)",
     re.IGNORECASE,
 )
 
@@ -245,22 +261,61 @@ def save_backup(drive_service, sender_addr: str, raw_text: str, keep: int) -> bo
 # PARSE / SERIALISE
 # ---------------------------------------------------------------------------
 
-def parse_memory(text: str) -> tuple[int, str]:
-    """Returns (folded_count, body). Files written by the previous version
-    have no header line; they're treated as folded=0, which just means the
-    first consolidation re-reads a few messages. Harmless."""
+class Watermark:
+    """What a memory file says it has already folded in.
+
+    Exactly one of the two is set. `ids` is the v2 form and is final.
+    `legacy_count` is a v1 `folded: N` that has not been resolved yet: it
+    only means something against the store's ordering, which parsing
+    doesn't have, so `resolve` does it once the store is to hand. A file
+    with no header parses as a v2 empty set — folded nothing, as before.
+    """
+
+    def __init__(self, ids=None, legacy_count: int | None = None):
+        self.ids = frozenset(ids) if ids is not None else None
+        self.legacy_count = legacy_count
+        if self.ids is None and self.legacy_count is None:
+            self.ids = frozenset()
+
+    def resolve(self, rows: list[dict]) -> frozenset:
+        """The folded ids, given that sender's `messages_for_sender()` rows.
+
+        For a v1 count this is the ids of `rows[:N]` — precisely the rows
+        the old `rows[N:]` slice treated as done, so the transition neither
+        re-folds nor drops anything. The result replaces the count, so a
+        later change to the rows can't move it.
+        """
+        if self.ids is None:
+            self.ids = frozenset(
+                r.get("gmail_msg_id", "") for r in rows[: self.legacy_count]
+            ) - {""}
+            self.legacy_count = None
+        return self.ids
+
+
+def parse_memory(text: str) -> tuple[Watermark, str]:
+    """Returns (watermark, body). Files written by the oldest version have
+    no header line; they're treated as having folded nothing, which just
+    means the first consolidation re-reads a few messages. Harmless."""
     if not text.strip():
-        return 0, ""
+        return Watermark(), ""
     first, _, rest = text.partition("\n")
+    match = _HEADER_V2_RE.match(first.strip())
+    if match:
+        ids = [i.strip() for i in match.group("ids").split(",") if i.strip()]
+        return Watermark(ids=ids), rest.lstrip("\n")
     match = _HEADER_RE.match(first.strip())
     if match:
-        return int(match.group("folded")), rest.lstrip("\n")
-    return 0, text
+        return Watermark(legacy_count=int(match.group("folded"))), rest.lstrip("\n")
+    return Watermark(), text
 
 
-def serialise_memory(sender_addr: str, folded: int, body: str) -> str:
+def serialise_memory(sender_addr: str, folded_ids, body: str) -> str:
+    # Sorted so that the same state always serialises to the same line,
+    # which keeps backups diffable.
     header = (
-        f"# indi-memory v1 | sender: {sender_addr} | folded: {folded} "
+        f"# indi-memory v2 | sender: {sender_addr} "
+        f"| folded_ids: {','.join(sorted(folded_ids))} "
         f"| updated: {_now_iso()}"
     )
     return f"{header}\n\n{body.strip()}\n"
@@ -279,8 +334,12 @@ class SenderMemory:
         self.name = memory_file_name(sender_addr)
         self.file_id = find_file_id(drive_service, self.name)
         raw = read_file(drive_service, self.file_id)
-        self.folded, self.body = parse_memory(raw)
+        self.watermark, self.body = parse_memory(raw)
         self.raw = raw
+
+    def folded_ids(self, store: "sheets_queue.SheetStore") -> frozenset:
+        """Gmail ids already folded into this sender's memory file."""
+        return self.watermark.resolve(store.messages_for_sender(self.sender_addr))
 
     def pending_rows(self, store: "sheets_queue.SheetStore",
                      exclude_msg_ids=None) -> list[dict]:
@@ -292,7 +351,8 @@ class SenderMemory:
         ends up covering every message.
         """
         rows = store.messages_for_sender(self.sender_addr)
-        rows = rows[self.folded:]
+        folded = self.watermark.resolve(rows)
+        rows = [r for r in rows if r.get("gmail_msg_id") not in folded]
         if exclude_msg_ids:
             excluded = set(exclude_msg_ids)
             rows = [r for r in rows if r.get("gmail_msg_id") not in excluded]
@@ -368,15 +428,17 @@ def consolidate(client, cfg, drive_service, store, sender_addr: str) -> bool:
         keep = getattr(cfg, "memory_backup_versions", DEFAULT_BACKUP_VERSIONS)
         save_backup(drive_service, sender_addr, memory.raw, keep)
 
-    total_folded = memory.folded + len(pending)
+    folded = memory.folded_ids(store) | (
+        {r.get("gmail_msg_id", "") for r in pending} - {""}
+    )
     write_file(
         drive_service,
         memory.name,
-        serialise_memory(sender_addr, total_folded, new_body),
+        serialise_memory(sender_addr, folded, new_body),
         memory.file_id,
     )
     log.info("Memory updated for %s (%d messages folded in total).",
-             sender_addr, total_folded)
+             sender_addr, len(folded))
     return True
 
 

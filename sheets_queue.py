@@ -30,6 +30,22 @@ What changed and why:
   * **Bodies are truncated before writing.** A single Sheets cell caps at
     50,000 characters; one long email would otherwise fail the write and
     abort the run.
+
+  * **The header row is checked, not assumed.** Every read here is by
+    column *name* and every write is by column *position*, so a sheet
+    whose row 1 stops being the header row does not fail — it quietly
+    returns blank values for every field, which looks exactly like
+    having no history. That happened: a row 1 holding message data had
+    the declared column names appended to it by `_ensure_headers`, and
+    from then on `gmail_msg_id`, `status` and the rest resolved to empty
+    columns. Two guards now stand in the way. `_ensure_headers` refuses
+    to append names to a row 1 that isn't a header row, and `_load`
+    checks each tab's header row against the columns this module
+    declares: it logs loudly, records the problem on the store, and
+    falls back to reading rows positionally against the declared
+    columns, which is how every write in this module lays them out.
+    Nothing here raises — with the sheet already broken, an exception on
+    load takes the harness offline along with its ability to say so.
 """
 
 from __future__ import annotations
@@ -97,7 +113,22 @@ COSTS_HEADERS = [
     "cache_read_tokens", "cache_write_tokens", "web_searches", "usd", "note",
 ]
 
+# The columns this module declares for each tab, so `_load` can check what
+# it read against what it expects without every call site passing them in.
+DECLARED_HEADERS = {
+    QUEUE_TAB: QUEUE_HEADERS,
+    RESPONSES_TAB: RESPONSES_HEADERS,
+    OUTBOUND_TAB: OUTBOUND_HEADERS,
+    JOURNAL_TAB: JOURNAL_HEADERS,
+    COSTS_TAB: COSTS_HEADERS,
+}
+
 _RANGE_ROW = re.compile(r"![A-Z]+(\d+)")
+
+# A header cell is a short identifier: letters, digits, underscores, and at
+# a stretch spaces, dots or dashes. Anything with a newline, an @, angle
+# brackets, or more than 64 characters is message data wearing row 1's hat.
+_HEADER_CELL = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_ .\-]{0,63}$")
 
 
 def _now_iso() -> str:
@@ -118,6 +149,27 @@ def _col_letter(index_zero_based: int) -> str:
         n = n // 26 - 1
         if n < 0:
             return result
+
+
+def looks_like_header(row, declared: list[str]) -> bool:
+    """Is this row plausibly the header row for a tab with these columns?
+
+    Deliberately generous about *which* columns are there and in what
+    order — a sheet written before a column was added is a header row one
+    name short, and refusing to recognise it would block the upgrade path
+    `_ensure_headers` exists for. Strict about the cells themselves: every
+    non-empty cell must look like a column name, so a row carrying a
+    subject line, an address or an email body is never mistaken for a
+    header, however many column names have been appended to the end of it.
+    """
+    cells = [str(c).strip() for c in row]
+    if not any(cells):
+        return False
+    for cell in cells:
+        if cell and not _HEADER_CELL.match(cell):
+            return False
+    present = sum(1 for name in declared if name in cells)
+    return present >= max(1, (len(declared) + 1) // 2)
 
 
 class SheetStore:
@@ -149,6 +201,11 @@ class SheetStore:
         # the order and spelling the sheet holds them, not the order this
         # module happens to declare.
         self._headers: dict[str, list[str]] = {}
+        # Anything `_load` found wrong with a tab's header row, keyed the
+        # same way as the cache. Empty is the normal state; a non-empty
+        # entry means that tab's values were read against the declared
+        # columns rather than the sheet's own row 1.
+        self.schema_problems: dict[str, str] = {}
 
     # -- spreadsheet lookup / creation ------------------------------------
 
@@ -231,7 +288,14 @@ class SheetStore:
 
     def _ensure_headers(self, spreadsheet_id: str, tab: str, headers: list[str]) -> None:
         """Adds any missing columns to an existing sheet, so upgrading from
-        the old schema doesn't require hand-editing."""
+        the old schema doesn't require hand-editing.
+
+        It will not, however, append column names to a row 1 that isn't a
+        header row. Doing that once produced a hybrid row — a whole
+        message followed by ten column names — after which every read by
+        name came back empty. If row 1 holds data, the sheet needs a
+        person, not another write.
+        """
         current = (
             self.sheets.spreadsheets()
             .values()
@@ -241,6 +305,17 @@ class SheetStore:
         )
         existing = current[0] if current else []
         if existing == headers:
+            return
+        if existing and not looks_like_header(existing, headers):
+            log.error(
+                "SHEET SCHEMA: refusing to extend headers on tab %r of %s — "
+                "row 1 does not look like a header row (first cells: %s). "
+                "Appending the declared columns to it would make every "
+                "read-by-name return blanks. Put the header row back in "
+                "row 1 (Sheets: File > Version history) and re-run.",
+                tab, spreadsheet_id,
+                "; ".join(repr(str(c)[:40]) for c in existing[:3]) or "(empty)",
+            )
             return
         merged = list(existing)
         for h in headers:
@@ -257,13 +332,25 @@ class SheetStore:
 
     # -- cached reads ------------------------------------------------------
 
-    def _load(self, spreadsheet_id: str, tab: str) -> list[dict]:
+    def _load(self, spreadsheet_id: str, tab: str,
+              declared: list[str] | None = None) -> list[dict]:
         """Read a tab once per run. Each returned dict carries `_row`, the
-        1-based sheet row number, so a cell can be updated in place."""
+        1-based sheet row number, so a cell can be updated in place.
+
+        The tab's header row is checked against the columns this module
+        declares for it. If row 1 isn't a header row at all, the rows are
+        read positionally against the declared columns — which is exactly
+        how `_append` and `set_status` write them — and row 1 is treated
+        as data rather than thrown away. That is logged at ERROR and
+        recorded in `schema_problems`; it is a stopgap that keeps the
+        harness answering mail, not a repair of the sheet.
+        """
         key = f"{spreadsheet_id}:{tab}"
         if key in self._cache:
             return self._cache[key]
 
+        expected = list(declared if declared is not None
+                        else DECLARED_HEADERS.get(tab) or [])
         values = (
             self.sheets.spreadsheets()
             .values()
@@ -273,15 +360,45 @@ class SheetStore:
         )
         rows: list[dict] = []
         headers: list[str] = []
+        data: list[list] = []
+        first_row_number = 2
         if values:
-            headers = values[0]
-            for offset, row in enumerate(values[1:], start=2):
-                if not row:
-                    continue
-                padded = list(row) + [""] * (len(headers) - len(row))
-                record = dict(zip(headers, padded))
-                record["_row"] = offset
-                rows.append(record)
+            headers = [str(c) for c in values[0]]
+            data = values[1:]
+            if expected and not looks_like_header(values[0], expected):
+                problem = (
+                    f"row 1 of tab {tab!r} is not a header row; reading every "
+                    f"row positionally against {', '.join(expected)}"
+                )
+                log.error(
+                    "SHEET SCHEMA: %s (first cells of row 1: %s). Reads by "
+                    "column name would otherwise all be blank. Restore the "
+                    "header row to row 1 — Sheets: File > Version history.",
+                    problem,
+                    "; ".join(repr(c[:40]) for c in headers[:3]) or "(empty)",
+                )
+                self.schema_problems[key] = problem
+                headers = list(expected)
+                data = values
+                first_row_number = 1
+            elif expected:
+                missing = [h for h in expected if h not in headers]
+                if missing:
+                    problem = (f"tab {tab!r} is missing declared column(s): "
+                               f"{', '.join(missing)}")
+                    log.error(
+                        "SHEET SCHEMA: %s. Those fields will read as empty "
+                        "for every row.", problem,
+                    )
+                    self.schema_problems[key] = problem
+
+        for offset, row in enumerate(data, start=first_row_number):
+            if not row:
+                continue
+            padded = list(row) + [""] * (len(headers) - len(row))
+            record = dict(zip(headers, padded))
+            record["_row"] = offset
+            rows.append(record)
         self._cache[key] = rows
         self._headers[key] = list(headers)
         log.debug("Loaded %d rows from %s", len(rows), tab)
@@ -293,12 +410,22 @@ class SheetStore:
         Loads the tab if it hasn't been read yet, so this costs nothing
         extra when the rows are wanted too. An empty list means the tab
         is empty or was never reachable — callers decide what to fall
-        back to rather than getting a guess from here.
+        back to rather than getting a guess from here. If `_load` had to
+        fall back to the declared columns, those are what comes back,
+        because those are the keys the parsed rows actually carry.
         """
         key = f"{spreadsheet_id}:{tab}"
         if key not in self._headers:
             self._load(spreadsheet_id, tab)
         return list(self._headers.get(key) or [])
+
+    def schema_report(self) -> dict[str, str]:
+        """What `_load` found wrong with the tabs read so far, if anything.
+
+        A copy, keyed by "<spreadsheet id>:<tab>". Empty means every tab
+        read this run had the header row it should have.
+        """
+        return dict(self.schema_problems)
 
     def queue_rows(self) -> list[dict]:
         return self._load(self.queue_id, QUEUE_TAB)

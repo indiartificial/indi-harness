@@ -14,6 +14,7 @@ dies at `import googleapiclient` before anything happens:
     /home/indi/venv/bin/python backfill_labels.py            # dry run: report, change nothing
     /home/indi/venv/bin/python backfill_labels.py --apply    # actually label
     /home/indi/venv/bin/python backfill_labels.py --dump-rows 5   # read-only: show the sheet's shape
+    /home/indi/venv/bin/python backfill_labels.py --dump-tail 5   # read-only: show the last rows
 
 Nothing in the poll or the heartbeat imports this. It is a migration
 step, not a routine, and it should happen once, when someone is watching.
@@ -51,10 +52,14 @@ What it takes care over:
   * **It can show the shape when the shape is wrong.** `--dump-rows N`
     prints the first N rows cell by cell, each cell truncated, with its
     column letter — the comma-joined header line is unreadable once a
-    cell holds an entire email body. Alongside it, a scan reports every
-    row where a declared header name turns up as a *value*, and in which
-    column, which is how a shifted or displaced header row shows itself.
-    Both are reads and neither depends on `--apply`.
+    cell holds an entire email body. `--dump-tail N` does the same for
+    the last N rows, with their real sheet row numbers, which is how a
+    sheet that is accumulating rows at the *top* rather than the bottom
+    shows itself: compare `received_at` at the two ends. Alongside
+    both, a scan reports every row where a declared header name turns
+    up as a *value*, and in which column, which is how a shifted or
+    displaced header row shows itself. All of these are reads and none
+    depends on `--apply`.
 """
 
 from __future__ import annotations
@@ -98,6 +103,16 @@ def _preview(value: str, width: int = _CELL_PREVIEW) -> str:
     return repr(collapsed)
 
 
+def _dump_block(rows: list[list[str]], first_number: int, out=print) -> None:
+    """Print `rows` cell by cell, numbering them from `first_number`."""
+    for offset, row in enumerate(rows):
+        n = first_number + offset
+        label = "row 1 (read as the header row)" if n == 1 else f"row {n}"
+        out(f"{label}: {len(row)} cell(s)")
+        for i, cell in enumerate(row):
+            out(f"    {sheets_queue._col_letter(i)}: {_preview(cell)}")
+
+
 def dump_rows(values: list[list[str]], count: int, out=print) -> None:
     """Print the first `count` rows cell by cell, with column letters.
 
@@ -112,12 +127,30 @@ def dump_rows(values: list[list[str]], count: int, out=print) -> None:
         return
     shown = values[: max(1, count)]
     out(f"--- first {len(shown)} row(s), cell by cell ---")
-    for n, row in enumerate(shown, start=1):
-        label = "row 1 (read as the header row)" if n == 1 else f"row {n}"
-        out(f"{label}: {len(row)} cell(s)")
-        for i, cell in enumerate(row):
-            out(f"    {sheets_queue._col_letter(i)}: {_preview(cell)}")
+    _dump_block(shown, 1, out=out)
     out("--- end of dump ---")
+
+
+def dump_tail(values: list[list[str]], count: int, out=print) -> None:
+    """Print the last `count` rows, numbered as the sheet numbers them.
+
+    The head of the sheet cannot tell you which way rows are being
+    added; the two ends together can. Read `received_at` in the first
+    rows and in these: if the oldest message is down here, the sheet is
+    oldest-first and appends are landing where they should, and if the
+    oldest is at the top, something is inserting new rows above the
+    old ones and every row number the status writer holds is a moving
+    target.
+    """
+    if not values:
+        out("(no rows to dump)")
+        return
+    n = max(1, count)
+    tail = values[-n:]
+    first_number = len(values) - len(tail) + 1
+    out(f"--- last {len(tail)} row(s) of {len(values)}, cell by cell ---")
+    _dump_block(tail, first_number, out=out)
+    out("--- end of tail ---")
 
 
 def scan_for_header_text(values: list[list[str]], headers: list[str],
@@ -284,7 +317,13 @@ def _report_source(drive, store) -> None:
         return
     print(f"Queue spreadsheet {store.queue_id}, tab {sheets_queue.QUEUE_TAB}: "
           f"{len(rows)} data row(s).")
-    print("Header row, one cell per line (truncated):")
+    # Deliberate wording: this is the column naming the module will *use*,
+    # which is the sheet's own row 1 only when row 1 is a header row. If a
+    # SHEET SCHEMA error appeared above, these are the declared names being
+    # applied positionally and row 1 holds something else entirely — the
+    # dump below is the one that shows what is actually in the cells.
+    print("Columns as this run will read them (the declared names if a "
+          "SHEET SCHEMA error appeared above), one per line:")
     for i, cell in enumerate(headers):
         print(f"  {sheets_queue._col_letter(i)}: {_preview(cell)}")
     if not headers:
@@ -295,8 +334,8 @@ def _report_source(drive, store) -> None:
                 "will be attributed to the wrong fields.")
 
 
-def _report_shape(store, dump_count: int) -> None:
-    """The read-only diagnostics: raw dump and header-text scan."""
+def _report_shape(store, dump_count: int, tail_count: int = 0) -> None:
+    """The read-only diagnostics: raw dump, tail dump, header-text scan."""
     try:
         values = read_raw_rows(store)
     except Exception:
@@ -306,6 +345,8 @@ def _report_shape(store, dump_count: int) -> None:
         return
     if dump_count > 0:
         dump_rows(values, dump_count)
+    if tail_count > 0:
+        dump_tail(values, tail_count)
     scan_for_header_text(values, sheets_queue.QUEUE_HEADERS)
 
 
@@ -318,11 +359,16 @@ def parse_args(argv=None):
                    help="read-only: print the first N rows cell by cell, then "
                         "scan every row for header names appearing as values, "
                         "and stop without touching labels")
+    p.add_argument("--dump-tail", type=int, default=0, metavar="N",
+                   help="read-only: print the last N rows cell by cell, with "
+                        "their sheet row numbers — compare received_at with "
+                        "the head to see which way rows are being added")
     return p.parse_args(argv)
 
 
 def main(argv=None) -> int:
     args = parse_args(argv)
+    diagnostic = bool(args.dump_rows or args.dump_tail)
     # Imported here so `backfill` can be tested without the Google client
     # stack, as drive_backup.py does. If this raises ModuleNotFoundError,
     # the script is being run outside the venv — see the usage note above.
@@ -333,7 +379,7 @@ def main(argv=None) -> int:
 
     cfg = Config.from_env(non_interactive=True)
     check_and_reply.setup_logging(cfg.log_path, verbose=False)
-    if not cfg.gmail_status_labels and not args.dump_rows:
+    if not cfg.gmail_status_labels and not diagnostic:
         print("INDI_GMAIL_STATUS_LABELS is off; not backfilling labels "
               "that nothing would keep up to date.")
         return 1
@@ -351,10 +397,10 @@ def main(argv=None) -> int:
             print(f"No spreadsheet named {sheets_queue.QUEUE_TITLE!r}; nothing to backfill.")
             return 1
         _report_source(drive, store)
-        if args.dump_rows:
+        if diagnostic:
             # Diagnostic mode: read the shape, change nothing, don't
             # pretend a labelling pass over a misread sheet means anything.
-            _report_shape(store, args.dump_rows)
+            _report_shape(store, args.dump_rows, args.dump_tail)
             print("Diagnostic run — no labels were touched.")
             return 0
         counts = backfill(gmail, store.queue_rows(), apply=args.apply)

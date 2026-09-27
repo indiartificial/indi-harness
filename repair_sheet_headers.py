@@ -2,54 +2,66 @@
 """
 repair_sheet_headers.py
 
-One-off repair of the Queue, Responses and Outbound tabs, whose header
-rows no longer match their data.
+One-off repair of the Queue and Responses tabs, which hold rows written
+in two different layouts under one header row that matches neither.
 
-WHAT WENT WRONG
----------------
-Every row the harness writes is laid out by *position*, in the order
-sheets_queue.py declares (QUEUE_HEADERS and friends). Every read is by
-*name*, looked up in row 1. On the Queue tab, row 1 stopped being that
-declared header row — it now reads `thread_id, "", "", "", gmail_msg_id,
-thread_id, sender, ...` — so every read by name lands in the wrong column:
-`gmail_msg_id` returns the subject, `status` returns the note, and so on.
-That has been silently breaking every sheet reader (status lookups,
-memory, history search, known correspondents), and it is why
-backfill_labels.py labelled nothing.
+WHAT WAS FOUND (2026-09-27)
+---------------------------
+Every row the harness writes is laid out by *position*; every read is by
+the *name* in row 1. Two generations of the harness have written these
+tabs:
 
-The data rows themselves are fine: column A is the message id, B the
-thread, C the sender ... H the status, I the note, exactly as declared.
-About a hundred older rows additionally carry a copy of the column names
-tacked on after their data (from column J) — the remains of the old
-`_ensure_headers` behaviour that sheets_queue.py's docstring describes.
+  Queue, old rows (ids 1-72, to about 2026-09-13):
+      id, gmail_msg_id, thread_id, sender, subject, body, received_at
+      — a counter first, no sender_addr, no status column at all.
+  Queue, current rows:
+      gmail_msg_id, thread_id, sender, sender_addr, subject, body,
+      received_at, status, note, attachments           (QUEUE_HEADERS)
+  Responses, old rows:
+      id, queue_row_id, response_text, created_at
+      — linked to the Queue by that old counter, not by Gmail id.
+  Responses, current rows:
+      gmail_msg_id, sender_addr, response_text, created_at   (RESPONSES_HEADERS)
+
+Row 1 of Queue reads `thread_id, "", "", "", gmail_msg_id, ...` and row 1
+of Responses is the old header with the new names appended. So every read
+by name has been landing in the wrong column for one generation or both:
+status lookups, memory, history search and known correspondents on the
+Queue side, and — on the Responses side — every reply's `gmail_msg_id`
+and `sender_addr` read as blank, which has quietly switched off the
+per-sender daily reply limit.
 
 WHAT THIS DOES
 --------------
-For each of the three tabs:
+It rewrites the old rows into the current layout, so each tab holds one
+layout under the right header:
 
-  1. Checks the data rows *positionally*: ids where ids go, a real status
-     in the status column, dates in the date column. A tab is repaired
-     only if at least REQUIRED_SHARE of its data rows pass. Otherwise it
-     is reported and left alone, because rewriting the header over data
-     that isn't where we think would make things worse, not better.
-  2. Rewrites row 1 as exactly the declared header row.
-  3. Clears the stray copies of the column names from the ends of rows
-     that have them. Nothing before them is touched.
+  * An old Queue row keeps its Gmail id, thread, sender, subject, body and
+    time. `sender_addr` is parsed from the sender. `status` is `replied`
+    if an old Responses row answers it, and left blank otherwise — the
+    old harness recorded nothing else, and a guess would be worse than a
+    blank (blank means "no label, not counted" everywhere downstream).
+    `note` records the old row id. The old time had no timezone; the old
+    harness wrote UTC, so +00:00 is added.
+  * An old Responses row gets the Gmail id and sender of the Queue row its
+    `queue_row_id` named. One whose Queue row can't be found keeps its
+    text and time with a blank id.
+  * Row 1 of each tab becomes exactly the declared header row.
+  * Stray copies of the column names on the ends of rows are cleared.
 
-It never reorders, deletes or edits a data value.
+Every row must be recognisable as one layout or the other. If any isn't,
+nothing is changed and those rows are listed. Current-layout rows are
+never edited except to clear stray names after their data.
 
 Dry run is the default. With --apply it first writes the raw contents of
-every tab it will change to a JSON file in your home directory (outside
-the harness, so it's in neither git nor the Drive backup), then makes the
-changes, holding the harness lock so no scheduled run appends meanwhile.
-Google Sheets' own version history (File > Version history) is a second
-way back.
+both tabs to a JSON file in your home directory (outside the harness, so
+it's in neither git nor the Drive backup), then makes the changes while
+holding the harness lock. Google Sheets' version history is a second way
+back.
 
     cd ~/harness
     /home/indi/venv/bin/python repair_sheet_headers.py           # report only
     /home/indi/venv/bin/python repair_sheet_headers.py --apply   # repair
-
-Afterwards, backfill_labels.py should find real message ids.
 """
 
 from __future__ import annotations
@@ -60,22 +72,26 @@ import json
 import os
 import re
 import sys
+from email.utils import parseaddr
 from pathlib import Path
 
 import sheets_queue
 
-REQUIRED_SHARE = 0.9
-
 _ID = re.compile(r"^[0-9a-f]{12,24}$", re.IGNORECASE)
+_INT = re.compile(r"^\d+$")
 _STATUSES = set(sheets_queue.STATUS_LABELS) | {""}
 
-
-def _col(i: int) -> str:
-    return sheets_queue._col_letter(i)
+Q_HEADERS = list(sheets_queue.QUEUE_HEADERS)
+R_HEADERS = list(sheets_queue.RESPONSES_HEADERS)
+O_HEADERS = list(sheets_queue.OUTBOUND_HEADERS)
 
 
 def _cell(row: list, i: int) -> str:
     return str(row[i]).strip() if i < len(row) else ""
+
+
+def _raw(row: list, i: int) -> str:
+    return str(row[i]) if i < len(row) else ""
 
 
 def _is_date(value: str) -> bool:
@@ -86,148 +102,220 @@ def _is_date(value: str) -> bool:
         return False
 
 
-def _queue_ok(row: list) -> bool:
-    return (bool(_ID.match(_cell(row, 0))) and bool(_ID.match(_cell(row, 1)))
-            and _cell(row, 7) in _STATUSES and _is_date(_cell(row, 6)))
+def _utc(value: str) -> str:
+    try:
+        when = datetime.datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return value
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=datetime.timezone.utc)
+    return when.isoformat()
 
 
-def _responses_ok(row: list) -> bool:
-    return (bool(_ID.match(_cell(row, 0))) and "@" in _cell(row, 1)
-            and _is_date(_cell(row, 3)))
+# -- recognising rows -------------------------------------------------------
+
+def queue_kind(row: list) -> str | None:
+    if (_ID.match(_cell(row, 0)) and _ID.match(_cell(row, 1))
+            and _is_date(_cell(row, 6)) and _cell(row, 7) in _STATUSES):
+        return "current"
+    if (_INT.match(_cell(row, 0)) and _ID.match(_cell(row, 1))
+            and _ID.match(_cell(row, 2)) and _is_date(_cell(row, 6))):
+        return "old"
+    return None
 
 
-def _outbound_ok(row: list) -> bool:
-    return "@" in _cell(row, 0) and _is_date(_cell(row, 4))
+def responses_kind(row: list) -> str | None:
+    if _ID.match(_cell(row, 0)) and "@" in _cell(row, 1) and _is_date(_cell(row, 3)):
+        return "current"
+    if _INT.match(_cell(row, 0)) and _INT.match(_cell(row, 1)) and _is_date(_cell(row, 3)):
+        return "old"
+    return None
 
 
-# (spreadsheet attribute on the store, tab, declared columns, row check)
-TABS = [
-    ("queue_id", sheets_queue.QUEUE_TAB, sheets_queue.QUEUE_HEADERS, _queue_ok),
-    ("responses_id", sheets_queue.RESPONSES_TAB, sheets_queue.RESPONSES_HEADERS, _responses_ok),
-    ("responses_id", sheets_queue.OUTBOUND_TAB, sheets_queue.OUTBOUND_HEADERS, _outbound_ok),
-]
+def outbound_kind(row: list) -> str | None:
+    return "current" if "@" in _cell(row, 0) and _is_date(_cell(row, 4)) else None
 
 
-def stray_header_start(row: list, headers: list[str]) -> int | None:
-    """Where a tacked-on copy of the column names begins in this row, or
-    None. Searched from the last declared column on — on the server the
-    copies start in the `attachments` column, which those rows left empty —
-    and only if most of the names appear there in order: a single cell
-    that happens to say "status" is data, not debris."""
+def stray_header_start(row: list, headers: list[str], first: int) -> int | None:
+    """Where a tacked-on copy of the column names begins, searching from
+    column index `first` on; None if there isn't one. Most of the names
+    must appear in order — one cell that happens to say "status" is data."""
     names = [str(c).strip() for c in row]
-    for start in range(max(1, len(headers) - 1), len(names)):
+    for start in range(first, len(names)):
         run = names[start:start + len(headers)]
-        matched = sum(1 for got, want in zip(run, headers) if got == want)
-        if matched >= max(2, (len(headers) + 1) // 2):
+        if sum(1 for got, want in zip(run, headers) if got == want) >= max(2, (len(headers) + 1) // 2):
             return start
     return None
 
 
-def plan_tab(values: list[list], headers: list[str], row_ok) -> dict:
-    """What a repair of this tab would change. Pure: reads `values` only."""
-    header_row = [str(c) for c in values[0]] if values else []
-    data = values[1:] if values else []
-    nonblank = [(n, r) for n, r in enumerate(data, start=2) if any(str(c).strip() for c in r)]
-    bad = [(n, r) for n, r in nonblank if not row_ok(r)]
-    share = 1 - len(bad) / len(nonblank) if nonblank else 1.0
-    strays = {}
-    for n, r in nonblank:
-        start = stray_header_start(r, headers)
-        if start is not None:
-            strays[n] = start
-    return {
-        "header_ok": header_row == list(headers),
-        "header_row": header_row,
-        "rows": len(nonblank),
-        "bad_rows": bad,
-        "share_ok": share,
-        "safe": share >= REQUIRED_SHARE,
-        "strays": strays,
+def _debris_start(row: list, first: int) -> int | None:
+    """Stray names from either generation's header."""
+    old_q = ["id", "gmail_msg_id", "thread_id", "sender", "subject", "body", "received_at"]
+    starts = [s for s in (stray_header_start(row, Q_HEADERS, first),
+                          stray_header_start(row, old_q, first),
+                          stray_header_start(row, R_HEADERS, first)) if s is not None]
+    return min(starts) if starts else None
+
+
+def _data(values):
+    return [(n, r) for n, r in enumerate(values[1:], start=2)
+            if any(str(c).strip() for c in r)]
+
+
+# -- the plan ---------------------------------------------------------------
+
+def plan(queue: list[list], responses: list[list], outbound: list[list] | None = None) -> dict:
+    """Everything a repair would change, computed from the raw values only."""
+    q_rows, r_rows = _data(queue), _data(responses)
+    unknown = [("Queue", n, r) for n, r in q_rows if queue_kind(r) is None]
+    unknown += [("Responses", n, r) for n, r in r_rows if responses_kind(r) is None]
+    if outbound:
+        unknown += [("Outbound", n, r) for n, r in _data(outbound) if outbound_kind(r) is None]
+
+    old_queue = {_cell(r, 0): r for _, r in q_rows if queue_kind(r) == "old"}
+    answered_old = {_cell(r, 1) for _, r in r_rows if responses_kind(r) == "old"}
+
+    edits = {"Queue": [], "Responses": []}          # (row, new values or None, clear-from index or None)
+    counts = {"queue_old": 0, "queue_old_replied": 0, "queue_strays": 0,
+              "responses_old": 0, "responses_unlinked": 0}
+
+    for n, r in q_rows:
+        kind = queue_kind(r)
+        if kind == "old":
+            counts["queue_old"] += 1
+            replied = _cell(r, 0) in answered_old
+            counts["queue_old_replied"] += replied
+            new = [_cell(r, 1), _cell(r, 2), _raw(r, 3),
+                   (parseaddr(_raw(r, 3))[1] or "").strip().lower(),
+                   _raw(r, 4), _raw(r, 5), _utc(_cell(r, 6)),
+                   sheets_queue.STATUS_REPLIED if replied else "",
+                   f"migrated from old row id {_cell(r, 0)}", ""]
+            edits["Queue"].append((n, new, len(Q_HEADERS)))
+        elif kind == "current":
+            start = _debris_start(r, len(Q_HEADERS) - 1)
+            if start is not None:
+                counts["queue_strays"] += 1
+                edits["Queue"].append((n, None, start))
+
+    for n, r in r_rows:
+        kind = responses_kind(r)
+        if kind == "old":
+            counts["responses_old"] += 1
+            q = old_queue.get(_cell(r, 1))
+            if q is None:
+                counts["responses_unlinked"] += 1
+            new = [_cell(q, 1) if q else "",
+                   (parseaddr(_raw(q, 3))[1] or "").strip().lower() if q else "",
+                   _raw(r, 2), _utc(_cell(r, 3))]
+            edits["Responses"].append((n, new, len(R_HEADERS)))
+        elif kind == "current":
+            start = _debris_start(r, len(R_HEADERS))
+            if start is not None:
+                edits["Responses"].append((n, None, start))
+
+    headers_ok = {
+        "Queue": bool(queue) and [str(c) for c in queue[0]] == Q_HEADERS,
+        "Responses": bool(responses) and [str(c) for c in responses[0]] == R_HEADERS,
+        "Outbound": not outbound or [str(c) for c in outbound[0]] == O_HEADERS,
     }
+    return {"unknown": unknown, "edits": edits, "counts": counts,
+            "headers_ok": headers_ok, "rows": {"Queue": len(q_rows), "Responses": len(r_rows)}}
 
 
-def describe(tab: str, plan: dict, out=print) -> None:
-    out(f"\nTab {tab!r}: {plan['rows']} data row(s).")
-    if plan["header_ok"]:
-        out("  Header row: correct.")
-    else:
-        out(f"  Header row: WRONG — {plan['header_row'][:14]}")
-    out(f"  Data rows laid out as declared: {plan['share_ok']:.0%} "
-        f"({plan['rows'] - len(plan['bad_rows'])} of {plan['rows']}).")
-    for n, r in plan["bad_rows"][:8]:
-        out(f"    row {n} doesn't fit: {[str(c)[:30] for c in r[:9]]}")
-    if len(plan["bad_rows"]) > 8:
-        out(f"    ... and {len(plan['bad_rows']) - 8} more")
-    if plan["strays"]:
-        out(f"  Rows with a stray copy of the column names on the end: {len(plan['strays'])}")
-    if not plan["safe"]:
-        out(f"  NOT SAFE TO REPAIR: under {REQUIRED_SHARE:.0%} of rows fit the "
-            "declared layout. Left alone — paste this output for help.")
+def describe(p: dict, out=print) -> None:
+    c = p["counts"]
+    out(f"Queue: {p['rows']['Queue']} data row(s); header {'correct' if p['headers_ok']['Queue'] else 'WRONG'}.")
+    out(f"  {c['queue_old']} old-layout row(s) to convert "
+        f"({c['queue_old_replied']} answered → 'replied', the rest left without a status).")
+    out(f"  {c['queue_strays']} current row(s) with stray column names to clear.")
+    out(f"Responses: {p['rows']['Responses']} data row(s); header "
+        f"{'correct' if p['headers_ok']['Responses'] else 'WRONG'}.")
+    out(f"  {c['responses_old']} old-layout row(s) to convert"
+        + (f" ({c['responses_unlinked']} whose Queue row can't be found keep a blank id)."
+           if c["responses_unlinked"] else "."))
+    if not p["headers_ok"]["Outbound"]:
+        out("Outbound: header WRONG (not repaired by this script).")
+    if p["unknown"]:
+        out(f"\nNOT SAFE TO REPAIR: {len(p['unknown'])} row(s) match neither layout:")
+        for tab, n, r in p["unknown"][:10]:
+            out(f"  {tab} row {n}: {[str(x)[:30] for x in r[:9]]}")
+        if len(p["unknown"]) > 10:
+            out(f"  ... and {len(p['unknown']) - 10} more")
+        out("Nothing will be changed. Paste this output for help.")
 
 
-def needs_repair(plan: dict) -> bool:
-    return plan["safe"] and (not plan["header_ok"] or bool(plan["strays"]))
+def _col(i: int) -> str:
+    return sheets_queue._col_letter(i)
 
 
-def apply_repair(sheets, spreadsheet_id: str, tab: str, headers: list[str],
-                 plan: dict) -> None:
-    """Row 1 := the declared headers; stray names cleared. Two calls."""
-    ranges = [f"{tab}!A1:Z1"] + [f"{tab}!{_col(start)}{n}:Z{n}"
-                                 for n, start in sorted(plan["strays"].items())]
-    sheets.spreadsheets().values().batchClear(
-        spreadsheetId=spreadsheet_id, body={"ranges": ranges}).execute()
-    sheets.spreadsheets().values().update(
-        spreadsheetId=spreadsheet_id, range=f"{tab}!A1",
-        valueInputOption="RAW", body={"values": [list(headers)]}).execute()
-
-
-def read_tab(sheets, spreadsheet_id: str, tab: str) -> list[list]:
-    return (sheets.spreadsheets().values()
-            .get(spreadsheetId=spreadsheet_id, range=f"{tab}!A1:Z")
-            .execute().get("values", []))
+def requests_for(tab: str, headers: list[str], edits, header_ok: bool):
+    """(ranges to clear, value ranges to write) for one tab."""
+    clears, writes = [], []
+    if not header_ok:
+        clears.append(f"{tab}!A1:Z1")
+        writes.append({"range": f"{tab}!A1", "values": [list(headers)]})
+    for n, new, clear_from in edits:
+        if new is not None:
+            writes.append({"range": f"{tab}!A{n}:{_col(len(new) - 1)}{n}", "values": [new]})
+        if clear_from is not None:
+            clears.append(f"{tab}!{_col(clear_from)}{n}:Z{n}")
+    return clears, writes
 
 
 def run(sheets, ids: dict[str, str], apply: bool, out=print,
         backup_dir: Path | None = None) -> int:
-    """Plan (and with `apply`, perform) the repair. Returns an exit code."""
-    work, unsafe = [], False
-    for attr, tab, headers, ok in TABS:
-        sid = ids.get(attr)
-        if not sid:
-            out(f"\nTab {tab!r}: spreadsheet not found, skipped.")
-            continue
-        values = read_tab(sheets, sid, tab)
-        plan = plan_tab(values, headers, ok)
-        describe(tab, plan, out)
-        unsafe |= not plan["safe"]
-        if needs_repair(plan):
-            work.append((sid, tab, headers, plan, values))
+    def read(sid, tab):
+        return (sheets.spreadsheets().values()
+                .get(spreadsheetId=sid, range=f"{tab}!A1:Z").execute().get("values", []))
 
-    if not work:
+    qid, rid = ids.get("queue_id"), ids.get("responses_id")
+    if not qid or not rid:
+        out("Could not find both the Queue and Responses spreadsheets.")
+        return 1
+    queue = read(qid, sheets_queue.QUEUE_TAB)
+    responses = read(rid, sheets_queue.RESPONSES_TAB)
+    outbound = read(rid, sheets_queue.OUTBOUND_TAB)
+    p = plan(queue, responses, outbound)
+    describe(p, out)
+    if p["unknown"]:
+        return 1
+
+    jobs = []
+    for sid, tab, headers in ((qid, sheets_queue.QUEUE_TAB, Q_HEADERS),
+                              (rid, sheets_queue.RESPONSES_TAB, R_HEADERS)):
+        name = "Queue" if tab == sheets_queue.QUEUE_TAB else "Responses"
+        clears, writes = requests_for(tab, headers, p["edits"][name], p["headers_ok"][name])
+        if clears or writes:
+            jobs.append((sid, tab, clears, writes))
+    if not jobs:
         out("\nNothing to repair.")
-        return 1 if unsafe else 0
+        return 0
     if not apply:
-        out(f"\nDry run: would repair {', '.join(repr(t) for _, t, _, _, _ in work)}. "
-            "Nothing was changed; re-run with --apply.")
-        return 1 if unsafe else 0
+        out("\nDry run: nothing was changed. Re-run with --apply to repair.")
+        return 0
 
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H%M%S")
     backup = (backup_dir or Path.home()) / f"indi-sheet-backup-{stamp}.json"
-    backup.write_text(json.dumps({t: v for _, t, _, _, v in work}), encoding="utf-8")
+    backup.write_text(json.dumps({"Queue": queue, "Responses": responses}), encoding="utf-8")
     try:
         os.chmod(backup, 0o600)
     except OSError:
         pass
     out(f"\nRaw contents saved to {backup}")
-    for sid, tab, headers, plan, _ in work:
-        apply_repair(sheets, sid, tab, headers, plan)
-        out(f"Repaired {tab!r}: header row rewritten, "
-            f"{len(plan['strays'])} stray name block(s) cleared.")
-    return 1 if unsafe else 0
+    for sid, tab, clears, writes in jobs:
+        if clears:
+            sheets.spreadsheets().values().batchClear(
+                spreadsheetId=sid, body={"ranges": clears}).execute()
+        if writes:
+            sheets.spreadsheets().values().batchUpdate(
+                spreadsheetId=sid,
+                body={"valueInputOption": "RAW", "data": writes}).execute()
+        out(f"Repaired {tab!r}: {len(writes)} range(s) written, {len(clears)} cleared.")
+    return 0
 
 
 def main(argv=None) -> int:
-    p = argparse.ArgumentParser(description="Repair the sheet header rows.")
+    p = argparse.ArgumentParser(description="Repair the Queue and Responses tabs.")
     p.add_argument("--apply", action="store_true", help="make the repair (default: report)")
     args = p.parse_args(argv)
 

@@ -90,6 +90,7 @@ import self_code
 import sheets_queue
 import terms
 import terms_gate
+import config
 from config import Config, matches_sender
 
 SCOPES = [
@@ -320,6 +321,39 @@ def mark_as_read(gmail, msg_id: str) -> None:
     ).execute()
 
 
+def build_store(cfg: Config, gmail, drive, sheets):
+    """The store for this configuration (see MIGRATE-GMAIL.md): Gmail and
+    Drive records, Gmail with the sheet, or the sheet alone."""
+    if gmail_store.drive_records_enabled(cfg):
+        # Steps 6-7: no spreadsheet at all. Mail and its status are in
+        # Gmail; journal, costs, reminders, newsletter and decisions are
+        # CSV files in Drive.
+        if not gmail_store.gmail_reads_enabled(cfg):
+            raise SystemExit("INDI_DRIVE_RECORDS=true needs INDI_GMAIL_READS=true "
+                             "as well — the mail would have no store.")
+        store = gmail_store.GmailStore(
+            drive_tables.DriveSheets(drive_tables.DriveIO(drive)),
+            drive, cfg, gmail, records_in_drive=True)
+        log.info("Mail reads come from Gmail (INDI_GMAIL_READS); records "
+                 "are in Drive (INDI_DRIVE_RECORDS).")
+    elif gmail_store.gmail_reads_enabled(cfg):
+        # Step 5 of MIGRATE-GMAIL.md: Gmail answers every read about
+        # mail; the sheet is still written, and still answers for the
+        # journal, costs, reminders and newsletter.
+        store = gmail_store.GmailStore(sheets, drive, cfg, gmail)
+        log.info("Mail reads come from Gmail (INDI_GMAIL_READS).")
+    else:
+        store = sheets_queue.SheetStore(
+            sheets, drive, cfg,
+            gmail_service=gmail if cfg.gmail_status_labels else None,
+            # Comparison logging only (MIGRATE-GMAIL.md, step 3); off by
+            # default, and the sheet still answers every read either way.
+            shadow_gmail_service=(gmail if gmail_reads.shadow_reads_enabled(cfg)
+                                  else None),
+        )
+    return store
+
+
 def self_addresses(gmail) -> set[str]:
     try:
         profile = gmail.users().getProfile(userId="me").execute()
@@ -457,6 +491,16 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
 
     trusted = cfg.is_trusted(sender)
     scope_all_history = cfg.may_search_all_history(sender)
+    # "*" in INDI_HISTORY_ALL_SENDERS used to mean everyone could search
+    # everyone's mail. Phase 2 replaces that with the audience rule
+    # (audience.py), so the wildcard no longer grants it; only addresses
+    # named explicitly keep the operator's unrestricted search.
+    if scope_all_history and "*" in cfg.history_all_senders:
+        named = tuple(p for p in cfg.history_all_senders if p.strip() != "*")
+        scope_all_history = config.matches_sender(named, sender)
+        if not scope_all_history:
+            log.info("INDI_HISTORY_ALL_SENDERS='*' is ignored: history search is "
+                     "scoped by who has seen each message.")
 
     # Privileged tiers are granted by address, and a From header is free
     # text. Verify the message actually came from that domain before
@@ -901,34 +945,10 @@ def main() -> int:
                      "(web fetch, code execution, cross-sender history) are off "
                      "for everyone.")
 
-        if gmail_store.drive_records_enabled(cfg):
-            # Steps 6-7: no spreadsheet at all. Mail and its status are in
-            # Gmail; journal, costs, reminders, newsletter and decisions are
-            # CSV files in Drive.
-            if not gmail_store.gmail_reads_enabled(cfg):
-                raise SystemExit("INDI_DRIVE_RECORDS=true needs INDI_GMAIL_READS=true "
-                                 "as well — the mail would have no store.")
-            store = gmail_store.GmailStore(
-                drive_tables.DriveSheets(drive_tables.DriveIO(drive)),
-                drive, cfg, gmail, records_in_drive=True)
-            log.info("Mail reads come from Gmail (INDI_GMAIL_READS); records "
-                     "are in Drive (INDI_DRIVE_RECORDS).")
-        elif gmail_store.gmail_reads_enabled(cfg):
-            # Step 5 of MIGRATE-GMAIL.md: Gmail answers every read about
-            # mail; the sheet is still written, and still answers for the
-            # journal, costs, reminders and newsletter.
-            store = gmail_store.GmailStore(sheets, drive, cfg, gmail)
-            log.info("Mail reads come from Gmail (INDI_GMAIL_READS).")
-        else:
-            store = sheets_queue.SheetStore(
-                sheets, drive, cfg,
-                gmail_service=gmail if cfg.gmail_status_labels else None,
-                # Comparison logging only (MIGRATE-GMAIL.md, step 3); off by
-                # default, and the sheet still answers every read either way.
-                shadow_gmail_service=(gmail if gmail_reads.shadow_reads_enabled(cfg)
-                                      else None),
-            )
+        store = build_store(cfg, gmail, drive, sheets)
         store.ensure_spreadsheets()
+        if hasattr(store, "selves"):
+            store.selves = set(selves)
 
         # Who has accepted the terms. Local, and read-only under
         # --dry-run so a rehearsal cannot record an acceptance that never

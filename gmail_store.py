@@ -276,6 +276,10 @@ class GmailStore(SheetStore):
         self._full: dict[str, dict] = {}
         self._threads: dict[str, list[dict]] = {}
         self._known: set[str] | None = None
+        # Indi's own addresses, set by the caller once known; needed to tell
+        # a Bcc from a Cc and Indi's messages from anyone else's.
+        self.selves: set[str] = set()
+        self._grants = None
         # With records in Drive, `sheets_service` is a drive_tables.DriveSheets
         # and the mail tabs are no longer written at all: Gmail and its
         # labels are the record of the mail, the Decisions file of the why.
@@ -557,7 +561,10 @@ class GmailStore(SheetStore):
         labelled = [m for m in own if reply_label and reply_label in (m.get("labelIds") or [])]
         return labelled or own
 
-    def responses_for(self, rows: list[dict]) -> dict[str, list[str]]:
+    def responses_for(self, rows: list[dict], cleared_for=None) -> dict[str, list[str]]:
+        """Indi's replies to each row. With `cleared_for`, only replies whose
+        own audience covers those people: a private reply to Bob can repeat
+        Bob's news, so it is Bob's to see, not Ann's."""
         out: dict[str, list[str]] = {}
         for row in rows:
             try:
@@ -566,6 +573,12 @@ class GmailStore(SheetStore):
                 log.warning("Could not read the thread of %s.",
                             row.get("gmail_msg_id"), exc_info=True)
                 continue
+            if cleared_for is not None:
+                import audience
+                wanted = {r.lower() for r in cleared_for if r}
+                replies = [m for m in replies if wanted <= audience.outgoing_audience(
+                    gmail_reads._headers(m).get("to", ""),
+                    gmail_reads._headers(m).get("cc", ""), self.selves)]
             texts = [gmail_io.extract_message(m, self.cfg.max_body_chars)["body"]
                      for m in replies]
             if texts:
@@ -608,8 +621,46 @@ class GmailStore(SheetStore):
         rows = [r for r in self._rows(self._handled_ids(limit=n)) if r["status"]]
         return rows[-n:]
 
+    # Phase 2: the audience rule (audience.py) answers who may see what.
+    supports_audience = True
+
+    def grants(self):
+        if self._grants is None:
+            import audience
+            self._grants = audience.GrantBook(self)
+        return self._grants
+
+    def _cleared(self, ids: list[str], recipients) -> list[str]:
+        """The ids, in order, that every one of `recipients` may see."""
+        import audience
+        meta = self._meta(ids)
+        grants = self.grants()
+        return [i for i in ids if i in meta
+                and audience.cleared(i, meta[i], recipients, self.selves, grants)]
+
     def search(self, query: str = "", sender: str = "", limit: int = 5,
-               restrict_to_sender: str = "") -> list[dict]:
+               restrict_to_sender: str = "", cleared_for=None) -> list[dict]:
+        """History search. With `cleared_for` (the people the reply will go
+        to), results are every handled message those people may all see,
+        whoever sent it — the audience rule, not the sender, is the scope —
+        and so are the replies shown with them. Without it, the older
+        sender scope applies."""
+        if cleared_for is not None:
+            recipients = {r.lower() for r in cleared_for if r}
+            if not recipients:
+                return []
+            pool = self.reads.search_ids(query, sender, max(1, limit) * 5, "")
+            ids = self._cleared(pool, recipients)[:max(1, limit)]
+            rows = [self._row(m) for m in self._get_many(ids)]
+            rows.sort(key=lambda r: r.get("received_at", ""), reverse=True)
+            replies = self.responses_for(rows, cleared_for=recipients)
+            return [
+                {"gmail_msg_id": r["gmail_msg_id"], "sender": r["sender"],
+                 "subject": r["subject"], "body": r["body"],
+                 "received_at": r["received_at"],
+                 "responses": replies.get(r["gmail_msg_id"], [])}
+                for r in rows
+            ]
         ids = self.reads.search_ids(query, sender, limit, restrict_to_sender)
         rows = [self._row(m) for m in self._get_many(ids)]
         # Belt and braces: search_ids has already scoped these, on the

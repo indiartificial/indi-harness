@@ -162,11 +162,20 @@ def history_search_schema(scoped_to_sender: bool, gmail_search: bool = False) ->
     store answers (MIGRATE-GMAIL.md, step 5): the sheet does substring
     matching, Gmail matches whole words. Describing one while the other
     answers makes the model write queries that silently find nothing."""
-    scope_note = (
-        " Results are limited to messages from the person you are currently "
-        "replying to."
-        if scoped_to_sender else ""
-    )
+    if scoped_to_sender and gmail_search:
+        # Phase 2: the scope is who has seen each message (audience.py).
+        scope_note = (
+            " Results are limited to messages the person you are replying to "
+            "has already seen: ones they sent or were on the To or Cc of, and "
+            "anything its owner has agreed to share with them. Mail from other "
+            "people that they were not party to is never returned, so its "
+            "absence tells you nothing either way."
+        )
+    elif scoped_to_sender:
+        scope_note = (" Results are limited to messages from the person you are "
+                      "currently replying to.")
+    else:
+        scope_note = ""
     if gmail_search:
         matching = (
             "Matching is Gmail search over subject and body: whole words, and "
@@ -541,13 +550,23 @@ def build_tools(cfg, trusted: bool, have_store: bool,
     return tools, betas
 
 
-def _run_history_search(store, cfg, tool_input: dict, restrict_to: str) -> str:
+def _run_history_search(store, cfg, tool_input: dict, restrict_to: str,
+                        cleared_for=None) -> str:
+    kwargs = {}
+    if cleared_for is not None:
+        if not getattr(store, "supports_audience", False):
+            # Never widen: without the audience rule, fall back to the
+            # sender's own mail.
+            cleared_for = None
+        else:
+            kwargs["cleared_for"] = cleared_for
     try:
         results = store.search(
             query=tool_input.get("query", ""),
             sender=tool_input.get("sender", ""),
             limit=cfg.max_history_search_results,
             restrict_to_sender=restrict_to,
+            **kwargs,
         )
     except Exception:
         # With Gmail answering, a malformed query or a Gmail hiccup would
@@ -937,6 +956,10 @@ def generate_reply(client, cfg, system_prompt: str, msg: dict,
     # Empty means "search everything"; otherwise the search is pinned to
     # this sender's own messages, enforced here rather than in the prompt.
     restrict_to = "" if scope_all_history else msg["from_addr"]
+    # Phase 2: who the reply goes to. Today that is the sender alone; the
+    # search shows only what all of them have already seen (audience.py).
+    cleared_for = (None if scope_all_history
+                   else frozenset({(msg.get("from_addr") or "").lower()} - {""}))
 
     # The rolling breakpoint: whichever tool-result block currently carries
     # one. Cleared before the next is set, so the request never holds more
@@ -984,7 +1007,7 @@ def generate_reply(client, cfg, system_prompt: str, msg: dict,
             if call.name == HISTORY_SEARCH_TOOL_NAME:
                 stats["history_searches"] += 1
                 text, is_error = _run_history_search(
-                    store, cfg, call.input, restrict_to
+                    store, cfg, call.input, restrict_to, cleared_for
                 ), False
             elif call.name == COST_LEDGER_TOOL_NAME:
                 if store is None or not trusted:

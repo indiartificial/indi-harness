@@ -13,3 +13,8 @@ data/correspondents.db
 
 # Correspondents' files, both directions. Personal data, and machine-local.
 data/attachments/
+
+# Cached Gmail headers (From/To/Cc/date per message id). Rebuildable, and
+# it holds correspondents' addresses, so it stays on the machine.
+data/gmail_meta_cache.json
+data/gmail_meta_cache.json.tmp

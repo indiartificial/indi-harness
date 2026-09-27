@@ -91,6 +91,7 @@ EXCLUDE: tuple[str, ...] = (
     # Other people's data.
     "data/attachments",
     "data/correspondents.db",
+    "data/gmail_meta_cache.json",
     "*.db",
     "*.sqlite",
     "*.sqlite3",

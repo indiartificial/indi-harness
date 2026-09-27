@@ -562,3 +562,85 @@ def test_prep_fetches_each_thread_once_and_retries(monkeypatch):
     counts = cutover_prep.label_replies(g, queue, responses, apply=True, out=lambda *_: None)
     assert counts["labelled"] == 5 and counts["errors"] == 0
     assert fetched == ["t-long"] and retries == [cutover_prep.RETRIES]
+
+
+# --------------------------------------------------------------------------
+# quota: the header cache and the pacer
+# --------------------------------------------------------------------------
+
+def _metadata_gets(g):
+    return [mid for mid, fmt in g.gets if fmt == "metadata"]
+
+
+def test_fixed_headers_are_fetched_once_across_runs(tmp_path):
+    g = FakeGmail()
+    path = tmp_path / "cache.json"
+    store = gmail_store.GmailStore(_gstore(g).sheets, None, _gstore(g).cfg, g,
+                                   cache=gmail_store.MetaCache(path))
+    store.queue_id, store.responses_id = "Q", "R"
+    for i in range(6):
+        _handled(store, g, f"a{i}", when=NOW - (10 - i) * HOUR)
+    g.gets.clear()
+    assert len(store.known_correspondents()) == 1
+    assert len(_metadata_gets(g)) == 6
+
+    # A new run, reading the cache from disk: nothing to fetch.
+    g.gets.clear()
+    again = gmail_store.GmailStore(store.sheets, None, store.cfg, g,
+                                   cache=gmail_store.MetaCache(path))
+    again.queue_id, again.responses_id = "Q", "R"
+    assert again.known_correspondents() == {ALICE}
+    assert [r["gmail_msg_id"] for r in again.messages_for_sender(ALICE, exclude_ids={
+        "a0", "a1", "a2", "a3", "a4"})] == ["a5"]
+    assert _metadata_gets(g) == []
+
+    # One new message: one fetch.
+    _handled(again, g, "b1", BOB)
+    g.gets.clear()
+    again._known = None
+    assert again.known_correspondents() == {ALICE, BOB}
+    assert _metadata_gets(g) == ["b1"]
+
+
+def test_a_damaged_cache_file_is_rebuilt_not_fatal(tmp_path):
+    path = tmp_path / "cache.json"
+    path.write_text("{not json")
+    cache = gmail_store.MetaCache(path)
+    assert cache.data == {}
+    cache.put({"id": "m1", "internalDate": "5", "threadId": "t",
+               "payload": {"headers": [{"name": "From", "value": ALICE}]}})
+    cache.save()
+    assert gmail_store.MetaCache(path).get("m1")["from"] == ALICE
+
+
+def test_the_pacer_waits_instead_of_overspending():
+    t = [0.0]
+    slept = []
+
+    def sleep(s):
+        slept.append(s)
+        t[0] += s
+
+    pacer = gmail_store.Pacer(per_minute=100, clock=lambda: t[0], sleep=sleep)
+    pacer.spend(60)
+    t[0] = 10
+    pacer.spend(30)                  # 90 of 100: no wait
+    assert slept == []
+    t[0] = 20
+    pacer.spend(30)                  # would be 120: wait for the first 60 to age out
+    assert len(slept) == 1 and 40 <= slept[0] <= 41
+    t[0] = 200
+    pacer.spend(100)                 # a new minute: no wait
+    assert len(slept) == 1
+
+
+def test_a_store_charges_the_pacer_for_what_it_fetches():
+    g = FakeGmail()
+    charged = []
+    pacer = SimpleNamespace(spend=charged.append)
+    store = gmail_store.GmailStore(_gstore(g).sheets, None, _gstore(g).cfg, g, pacer=pacer)
+    store.queue_id, store.responses_id = "Q", "R"
+    _handled(store, g, "m1")
+    store.known_correspondents()
+    store.responses_for(store.recent_messages(1))
+    assert gmail_store.UNITS_GET in charged and gmail_store.UNITS_THREAD in charged

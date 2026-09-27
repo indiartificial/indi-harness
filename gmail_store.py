@@ -53,12 +53,22 @@ What Gmail does not hold: the queue row's `note` and an outbound message's
 but people); both are still written to the sheet, and move to the Journal
 on Drive at step 6.
 
-Cost. Every read here is Gmail traffic where the sheet was one cached
-read per run. Metadata gets are used wherever a header is all that is
-needed, bodies are fetched only for rows actually returned, threads are
-cached for the run, and gets are batched. The lists that could grow
-without bound (known correspondents, a long-standing correspondent's
-history) are capped, and hitting a cap is logged.
+Cost. Gmail meters every call in quota units, per user per minute. For
+projects created from May 2026 — Indi's is one — the budget is 6,000
+units a minute, and a message fetch costs 20 units (a thread 40, a list
+5). At those prices re-reading the same headers every run is what runs
+out the budget, so:
+
+  * **Headers that never change are cached on disk** (MetaCache below):
+    a message's From, To, Cc, date and thread are fixed once it exists.
+    Which label a message carries does change, and is always asked of
+    Gmail — but that is a list call, 5 units per 500 messages. So each
+    question costs a few list calls plus 20 units per message the cache
+    hasn't seen yet, instead of 20 units per message ever handled.
+  * **Every run paces itself** (Pacer below) to stay under the per-minute
+    budget, rather than running into it and waiting out the retries.
+  * Bodies are fetched only for rows actually returned, threads once per
+    run, and gets are batched.
 """
 
 from __future__ import annotations
@@ -80,10 +90,21 @@ log = logging.getLogger("indi.gmail_store")
 # of this size; hitting one is logged rather than silently truncating.
 MAX_LIST_PAGES = 20          # x 500 ids per page
 MAX_KNOWN_FETCH = 3000
-BATCH_SIZE = 25              # Gmail's per-user rate is 250 units/s; a get is 5
+BATCH_SIZE = 25              # Google recommends at most 50 per batch
 # The client retries rateLimitExceeded and 5xx itself, with backoff, when
 # asked to. Batched gets that come back failed are retried one at a time.
 RETRIES = 5
+
+# Gmail API quota units (reference/quota, as revised 2026-05-01) and the
+# share of the 6,000-a-minute user budget one run lets itself spend. The
+# rest is headroom for the retries, the send, and anything else running.
+UNITS_GET = 20
+UNITS_THREAD = 40
+UNITS_PER_MINUTE = 4500
+
+# The headers MetaCache keeps. Fixed for the life of a message.
+META_HEADERS = ("From", "To", "Cc")
+DEFAULT_CACHE_NAME = "gmail_meta_cache.json"
 
 _TRUE = ("1", "true", "yes", "on")
 
@@ -140,11 +161,109 @@ def _single_sender(from_raw: str) -> str:
     return gmail_reads.normalise_addr(from_raw) if len(found) == 1 else ""
 
 
+class Pacer:
+    """Keeps one run's Gmail spending under a per-minute budget by waiting
+    before a call that would go over, instead of making the call, being
+    refused and backing off. Clock and sleep are injectable for tests."""
+
+    def __init__(self, per_minute: int = UNITS_PER_MINUTE, clock=None, sleep=None):
+        import time
+        self.per_minute = per_minute
+        self.clock = clock or time.monotonic
+        self.sleep = sleep or time.sleep
+        self.spent: list[tuple[float, int]] = []
+
+    def spend(self, units: int) -> None:
+        now = self.clock()
+        self.spent = [(t, u) for t, u in self.spent if now - t < 60]
+        used = sum(u for _, u in self.spent)
+        if self.spent and used + units > self.per_minute:
+            # Wait until enough of the last minute's spending has aged out.
+            need = used + units - self.per_minute
+            for t, u in self.spent:
+                need -= u
+                if need <= 0:
+                    wait = 60 - (now - t) + 0.05
+                    log.info("Pacing Gmail calls: waiting %.1fs to stay under "
+                             "%d units a minute.", wait, self.per_minute)
+                    self.sleep(max(wait, 0))
+                    break
+            now = self.clock()
+            self.spent = [(t, u) for t, u in self.spent if now - t < 60]
+        self.spent.append((now, units))
+
+
+class MetaCache:
+    """Gmail id -> the headers of that message that never change.
+
+    A JSON file beside the other machine-local data. It is only ever a
+    copy of what Gmail holds: delete it and the next run rebuilds it,
+    slowly. A message deleted from Gmail stays in the file harmlessly,
+    since nothing is looked up here except ids Gmail has just listed.
+    `path=None` keeps it in memory only (tests, dry runs)."""
+
+    def __init__(self, path=None):
+        self.path = path
+        self.data: dict[str, dict] = {}
+        self.dirty = False
+        if path is not None:
+            try:
+                import json
+                with open(path, encoding="utf-8") as fh:
+                    self.data = json.load(fh)
+            except FileNotFoundError:
+                pass
+            except Exception:
+                log.warning("Gmail header cache %s unreadable; starting afresh.",
+                            path, exc_info=True)
+                self.data = {}
+
+    def get(self, msg_id: str) -> dict | None:
+        return self.data.get(msg_id)
+
+    def put(self, message: dict) -> dict:
+        hdrs = gmail_reads._headers(message)
+        entry = {"from": hdrs.get("from", ""), "to": hdrs.get("to", ""),
+                 "cc": hdrs.get("cc", ""), "date": _internal_ms(message),
+                 "thread": message.get("threadId", "")}
+        self.data[message["id"]] = entry
+        self.dirty = True
+        return entry
+
+    def save(self) -> None:
+        if self.path is None or not self.dirty:
+            return
+        import json
+        import os
+        tmp = f"{self.path}.tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(self.data, fh)
+            os.replace(tmp, self.path)
+            self.dirty = False
+        except Exception:
+            log.warning("Could not save the Gmail header cache.", exc_info=True)
+
+
+def default_cache_path(cfg):
+    base = getattr(cfg, "base_dir", None)
+    if base is None:
+        return None
+    from pathlib import Path
+    folder = Path(base) / "data"
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return None
+    return folder / DEFAULT_CACHE_NAME
+
+
 class GmailStore(SheetStore):
     """A SheetStore that reads mail from Gmail. See the module docstring."""
 
     def __init__(self, sheets_service, drive_service, cfg, gmail_service,
-                 records_in_drive: bool = False):
+                 records_in_drive: bool = False, cache: MetaCache | None = None,
+                 pacer: Pacer | None = None):
         # Labels are what this store reads, so the writes that set them are
         # always on here, whatever INDI_GMAIL_STATUS_LABELS says.
         if not getattr(cfg, "gmail_status_labels", True):
@@ -161,6 +280,9 @@ class GmailStore(SheetStore):
         # and the mail tabs are no longer written at all: Gmail and its
         # labels are the record of the mail, the Decisions file of the why.
         self.records_in_drive = records_in_drive
+        self.cache = cache if cache is not None else MetaCache(
+            None if getattr(cfg, "dry_run", False) else default_cache_path(cfg))
+        self.pacer = pacer or Pacer()
 
     # -- records in Drive (steps 6-7) -------------------------------------
 
@@ -275,6 +397,7 @@ class GmailStore(SheetStore):
         batch_factory = getattr(self.gmail, "new_batch_http_request", None)
         if batch_factory is not None and len(missing) > 1:
             for start in range(0, len(missing), BATCH_SIZE):
+                self.pacer.spend(UNITS_GET * len(missing[start:start + BATCH_SIZE]))
                 def done(request_id, response, exception):
                     if exception is None and response:
                         got[request_id] = response
@@ -289,6 +412,7 @@ class GmailStore(SheetStore):
         for mid in missing:
             if mid in got:
                 continue
+            self.pacer.spend(UNITS_GET)
             try:
                 got[mid] = request(mid).execute(num_retries=RETRIES)
             except Exception:
@@ -298,10 +422,27 @@ class GmailStore(SheetStore):
             return [self._full[i] for i in ids if i in self._full]
         return [got[i] for i in ids if i in got]
 
+    def _meta(self, ids: list[str]) -> dict[str, dict]:
+        """The fixed headers of these messages: from the cache, fetching
+        (and caching) only the ones it hasn't seen."""
+        out, missing = {}, []
+        for mid in ids:
+            entry = self.cache.get(mid)
+            if entry is None:
+                missing.append(mid)
+            else:
+                out[mid] = entry
+        if missing:
+            for m in self._get_many(missing, fmt="metadata", headers=META_HEADERS):
+                out[m["id"]] = self.cache.put(m)
+            self.cache.save()
+        return out
+
     def _thread(self, thread_id: str) -> list[dict]:
         if not thread_id:
             return []
         if thread_id not in self._threads:
+            self.pacer.spend(UNITS_THREAD)
             thread = self.gmail.users().threads().get(
                 userId="me", id=thread_id, format="full").execute(num_retries=RETRIES)
             self._threads[thread_id] = sorted(thread.get("messages", []) or [],
@@ -388,15 +529,14 @@ class GmailStore(SheetStore):
             return []
         q = f"from:{addr}" if gmail_reads._query_addr(addr) else ""
         ids = self._ids(STATUS_LABELS[sheets_queue.STATUS_REPLIED], q)
-        metas = self._get_many(ids, fmt="metadata", headers=("From",))
-        replied = self._label_id(STATUS_LABELS[sheets_queue.STATUS_REPLIED])
         excluded = set(exclude_ids or ())
-        mine = [m for m in metas
-                if replied in (m.get("labelIds") or [])
-                and _single_sender(gmail_reads._headers(m).get("from", "")) == addr
-                and m.get("id") not in excluded]
-        mine.sort(key=_internal_ms)
-        return self._rows([m["id"] for m in mine])
+        # The label came from the list; the sender comes from the cache,
+        # checked exactly, because `from:` is a search, not an equality.
+        meta = self._meta(ids)
+        mine = sorted((mid for mid, m in meta.items()
+                       if _single_sender(m["from"]) == addr and mid not in excluded),
+                      key=lambda mid: meta[mid]["date"])
+        return self._rows(mine)
 
     # -- replies ----------------------------------------------------------
 
@@ -444,12 +584,8 @@ class GmailStore(SheetStore):
         cutoff_ms = int((_utc_now() - datetime.timedelta(days=1)).timestamp() * 1000)
         q = "newer_than:2d" + (f" to:{addr}" if gmail_reads._query_addr(addr) else "")
         ids = self._ids(LABEL_REPLY, q)
-        metas = self._get_many(ids, fmt="metadata", headers=("To",))
-        reply_label = self._label_id(LABEL_REPLY)
-        return sum(1 for m in metas
-                   if reply_label in (m.get("labelIds") or [])
-                   and addr in gmail_reads._addrs(gmail_reads._headers(m).get("to", ""))
-                   and _internal_ms(m) >= cutoff_ms)
+        return sum(1 for m in self._meta(ids).values()
+                   if addr in gmail_reads._addrs(m["to"]) and m["date"] >= cutoff_ms)
 
     # -- handled mail in general -----------------------------------------
 
@@ -509,8 +645,7 @@ class GmailStore(SheetStore):
         days = hours // 24 + 2
         cutoff_ms = int((_utc_now() - datetime.timedelta(hours=hours)).timestamp() * 1000)
         ids = self._ids(LABEL_OUTBOUND, f"newer_than:{days}d")
-        metas = self._get_many(ids, fmt="metadata", headers=("To",))
-        return [m for m in metas if _internal_ms(m) >= cutoff_ms]
+        return [m for m in self._meta(ids).values() if m["date"] >= cutoff_ms]
 
     def outbound_today(self) -> int:
         return len(self._outbound_since(24))
@@ -518,7 +653,7 @@ class GmailStore(SheetStore):
     def outbound_today_to(self, recipient: str) -> int:
         addr = gmail_reads.normalise_addr(recipient)
         return sum(1 for m in self._outbound_since(24)
-                   if addr in gmail_reads._addrs(gmail_reads._headers(m).get("to", "")))
+                   if addr in gmail_reads._addrs(m["to"]))
 
     def recent_outbound(self, n: int) -> list[dict]:
         """The last `n` messages Indi started, oldest first."""
@@ -547,23 +682,24 @@ class GmailStore(SheetStore):
         if self._known is not None:
             return set(self._known)
         out: set[str] = set()
-        budget = MAX_KNOWN_FETCH
+        ids = []
         for status in (sheets_queue.STATUS_REPLIED, sheets_queue.STATUS_IGNORED):
-            ids = self._ids(STATUS_LABELS[status])[:budget]
-            budget -= len(ids)
-            for m in self._get_many(ids, fmt="metadata", headers=("From",)):
-                addr = _single_sender(gmail_reads._headers(m).get("from", ""))
-                if addr:
-                    out.add(addr)
-        ids = self._ids(LABEL_OUTBOUND)[:max(budget, 0)]
-        budget -= len(ids)
-        for m in self._get_many(ids, fmt="metadata", headers=("To", "Cc")):
-            hdrs = gmail_reads._headers(m)
-            out |= gmail_reads._addrs(hdrs.get("to", "")) | gmail_reads._addrs(hdrs.get("cc", ""))
-        if budget <= 0:
+            ids += self._ids(STATUS_LABELS[status])
+        outbound_ids = self._ids(LABEL_OUTBOUND)
+        wanted = (ids + outbound_ids)[:MAX_KNOWN_FETCH]
+        if len(ids) + len(outbound_ids) > MAX_KNOWN_FETCH:
             # Short is the safe direction — fewer people Indi may write to
             # first — but it is still wrong, so say so.
-            log.warning("known_correspondents stopped at %d fetches; the set "
+            log.warning("known_correspondents stopped at %d messages; the set "
                         "may be incomplete.", MAX_KNOWN_FETCH)
+        meta = self._meta(wanted)
+        for mid in ids:
+            if mid in meta:
+                addr = _single_sender(meta[mid]["from"])
+                if addr:
+                    out.add(addr)
+        for mid in outbound_ids:
+            if mid in meta:
+                out |= gmail_reads._addrs(meta[mid]["to"]) | gmail_reads._addrs(meta[mid]["cc"])
         self._known = out
         return set(out)

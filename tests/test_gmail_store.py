@@ -101,7 +101,8 @@ class FakeGmail:
 
     @staticmethod
     def _call(fn):
-        return SimpleNamespace(execute=fn)
+        # Real requests take execute(num_retries=...); so does this.
+        return SimpleNamespace(execute=lambda **_: fn())
 
     def _labels_list(self, userId):
         return self._call(lambda: {"labels": [{"id": i, "name": n}
@@ -537,3 +538,27 @@ def test_prep_converts_v1_memory_against_the_sheets_order():
     assert watermark.ids == frozenset({"a1", "a2"}) and body.strip() == "likes tea"
     again = cutover_prep.convert_memory(None, store, apply=True, keep=3, out=quiet, io=io)
     assert again["already_v2"] == 1 and len(backups) == 1
+
+
+def test_prep_fetches_each_thread_once_and_retries(monkeypatch):
+    import cutover_prep
+    monkeypatch.setattr(cutover_prep, "PAUSE_SECONDS", 0)
+    g = FakeGmail()
+    fetched, retries = [], []
+    real = g._thread
+
+    def counting(userId, id, format="full", metadataHeaders=None):
+        fetched.append(id)
+        call = real(userId, id, format, metadataHeaders)
+        return SimpleNamespace(execute=lambda num_retries=0: (retries.append(num_retries),
+                                                               call.execute())[1])
+    g.threads = lambda: SimpleNamespace(get=counting)
+    for i in range(5):
+        _incoming(g, f"m{i}", thread="t-long")
+        g.add(f"r{i}", INDI, ALICE, thread="t-long", labels=("SENT",),
+              in_reply_to=f"<m{i}@mail>")
+    queue = [{"gmail_msg_id": f"m{i}", "thread_id": "t-long"} for i in range(5)]
+    responses = [{"gmail_msg_id": f"m{i}"} for i in range(5)]
+    counts = cutover_prep.label_replies(g, queue, responses, apply=True, out=lambda *_: None)
+    assert counts["labelled"] == 5 and counts["errors"] == 0
+    assert fetched == ["t-long"] and retries == [cutover_prep.RETRIES]

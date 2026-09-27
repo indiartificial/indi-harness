@@ -39,12 +39,25 @@ import argparse
 import datetime
 import logging
 import sys
+import time
 
 import gmail_io
 import memory_file
 import sheets_queue
 
 log = logging.getLogger("indi.cutover_prep")
+
+# Gmail allows each user a fixed number of quota units per minute, and a
+# thread fetch is among the dearer calls. The first run of this script hit
+# that limit about a hundred messages in. So: the client's own retry with
+# backoff (which covers rateLimitExceeded), each thread fetched once, and
+# a short pause between messages.
+RETRIES = 6
+PAUSE_SECONDS = 0.25
+
+
+def _run(request):
+    return request.execute(num_retries=RETRIES)
 
 
 def _headers(message: dict) -> dict[str, str]:
@@ -66,21 +79,25 @@ def label_replies(gmail, queue_rows, response_rows, apply: bool, out=print) -> d
               "missing": 0, "errors": 0}
     answered = sorted({r.get("gmail_msg_id", "").strip() for r in response_rows} - {""})
     threads = {r.get("gmail_msg_id"): r.get("thread_id", "") for r in queue_rows}
+    thread_cache: dict[str, list] = {}
     out(f"Replies: {len(answered)} answered message(s) in the Responses tab.")
     for msg_id in answered:
         try:
-            src = gmail.users().messages().get(
+            time.sleep(PAUSE_SECONDS)
+            src = _run(gmail.users().messages().get(
                 userId="me", id=msg_id, format="metadata",
-                metadataHeaders=["Message-ID"]).execute()
+                metadataHeaders=["Message-ID"]))
         except Exception:
             counts["missing"] += 1
             continue
         try:
             rfc = _headers(src).get("message-id", "").strip()
             thread_id = src.get("threadId") or threads.get(msg_id, "")
-            thread = gmail.users().threads().get(
-                userId="me", id=thread_id, format="metadata",
-                metadataHeaders=["In-Reply-To"]).execute().get("messages", [])
+            if thread_id not in thread_cache:
+                thread_cache[thread_id] = _run(gmail.users().threads().get(
+                    userId="me", id=thread_id, format="metadata",
+                    metadataHeaders=["In-Reply-To"])).get("messages", [])
+            thread = thread_cache[thread_id]
             mine = [m for m in thread
                     if {"SENT", "DRAFT"} & set(m.get("labelIds") or [])
                     and rfc and _headers(m).get("in-reply-to", "").strip() == rfc]
@@ -94,6 +111,10 @@ def label_replies(gmail, queue_rows, response_rows, apply: bool, out=print) -> d
                     counts["already"] += 1
                 elif apply:
                     labeler.apply(m["id"], sheets_queue.LABEL_REPLY, ())
+                    # The thread is cached: record the label here too, so a
+                    # later pass over the same thread sees it as done.
+                    m.setdefault("labelIds", []).append(
+                        labeler.existing_id(sheets_queue.LABEL_REPLY))
                     counts["labelled"] += 1
                 else:
                     counts["would_label"] += 1
@@ -117,14 +138,15 @@ def label_outbound(gmail, outbound_rows, apply: bool, out=print) -> dict:
             continue
         try:
             lo, hi = int(when.timestamp()) - 86400, int(when.timestamp()) + 86400
-            found = gmail.users().messages().list(
+            time.sleep(PAUSE_SECONDS)
+            found = _run(gmail.users().messages().list(
                 userId="me", q=f"to:{to} after:{lo} before:{hi}", maxResults=25,
-            ).execute().get("messages", []) or []
+            )).get("messages", []) or []
             match = None
             for ref in found:
-                m = gmail.users().messages().get(
+                m = _run(gmail.users().messages().get(
                     userId="me", id=ref["id"], format="metadata",
-                    metadataHeaders=["Subject", "To"]).execute()
+                    metadataHeaders=["Subject", "To"]))
                 if not {"SENT", "DRAFT"} & set(m.get("labelIds") or []):
                     continue
                 if _headers(m).get("subject", "").strip() == subject:

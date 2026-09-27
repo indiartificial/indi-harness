@@ -81,6 +81,9 @@ log = logging.getLogger("indi.gmail_store")
 MAX_LIST_PAGES = 20          # x 500 ids per page
 MAX_KNOWN_FETCH = 3000
 BATCH_SIZE = 25              # Gmail's per-user rate is 250 units/s; a get is 5
+# The client retries rateLimitExceeded and 5xx itself, with backoff, when
+# asked to. Batched gets that come back failed are retried one at a time.
+RETRIES = 5
 
 _TRUE = ("1", "true", "yes", "on")
 
@@ -180,13 +183,7 @@ class GmailStore(SheetStore):
                                                      format=fmt, **extra)
 
         batch_factory = getattr(self.gmail, "new_batch_http_request", None)
-        if batch_factory is None or len(missing) <= 1:
-            for mid in missing:
-                try:
-                    got[mid] = request(mid).execute()
-                except Exception:
-                    log.debug("Could not fetch %s", mid, exc_info=True)
-        else:
+        if batch_factory is not None and len(missing) > 1:
             for start in range(0, len(missing), BATCH_SIZE):
                 def done(request_id, response, exception):
                     if exception is None and response:
@@ -197,6 +194,15 @@ class GmailStore(SheetStore):
                 for mid in missing[start:start + BATCH_SIZE]:
                     batch.add(request(mid), request_id=mid)
                 batch.execute()
+        # One at a time: everything when there's no batching, and whatever
+        # a batch lost (a rate-limited part comes back as an exception).
+        for mid in missing:
+            if mid in got:
+                continue
+            try:
+                got[mid] = request(mid).execute(num_retries=RETRIES)
+            except Exception:
+                log.debug("Could not fetch %s", mid, exc_info=True)
         if fmt == "full":
             self._full.update(got)
             return [self._full[i] for i in ids if i in self._full]
@@ -207,7 +213,7 @@ class GmailStore(SheetStore):
             return []
         if thread_id not in self._threads:
             thread = self.gmail.users().threads().get(
-                userId="me", id=thread_id, format="full").execute()
+                userId="me", id=thread_id, format="full").execute(num_retries=RETRIES)
             self._threads[thread_id] = sorted(thread.get("messages", []) or [],
                                               key=_internal_ms)
         return self._threads[thread_id]
@@ -254,7 +260,7 @@ class GmailStore(SheetStore):
         try:
             meta = self.gmail.users().messages().get(
                 userId="me", id=gmail_msg_id, format="metadata",
-                metadataHeaders=["From"]).execute()
+                metadataHeaders=["From"]).execute(num_retries=RETRIES)
         except Exception:
             meta = None
         by_id = self._status_by_label_id()

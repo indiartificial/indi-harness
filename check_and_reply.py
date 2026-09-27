@@ -79,6 +79,7 @@ import correspondents
 import costs
 import gmail_io
 import gmail_reads
+import drive_tables
 import gmail_store
 import local_tools
 import locking
@@ -900,7 +901,19 @@ def main() -> int:
                      "(web fetch, code execution, cross-sender history) are off "
                      "for everyone.")
 
-        if gmail_store.gmail_reads_enabled(cfg):
+        if gmail_store.drive_records_enabled(cfg):
+            # Steps 6-7: no spreadsheet at all. Mail and its status are in
+            # Gmail; journal, costs, reminders, newsletter and decisions are
+            # CSV files in Drive.
+            if not gmail_store.gmail_reads_enabled(cfg):
+                raise SystemExit("INDI_DRIVE_RECORDS=true needs INDI_GMAIL_READS=true "
+                                 "as well — the mail would have no store.")
+            store = gmail_store.GmailStore(
+                drive_tables.DriveSheets(drive_tables.DriveIO(drive)),
+                drive, cfg, gmail, records_in_drive=True)
+            log.info("Mail reads come from Gmail (INDI_GMAIL_READS); records "
+                     "are in Drive (INDI_DRIVE_RECORDS).")
+        elif gmail_store.gmail_reads_enabled(cfg):
             # Step 5 of MIGRATE-GMAIL.md: Gmail answers every read about
             # mail; the sheet is still written, and still answers for the
             # journal, costs, reminders and newsletter.

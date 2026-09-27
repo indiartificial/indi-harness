@@ -40,7 +40,21 @@ the step 3 shadow.
 memory file as v2, resolving `folded: N` against the *sheet's* order now,
 instead of waiting for each correspondent to trigger a consolidation.
 
-**Order, from here:**
+**Update, 2026-09-27.** Done on the server: the sheet's header rows were
+repaired (`repair_sheet_headers.py` — two generations of row layout under
+one wrong header had been misreading every lookup), the status backfill
+and `cutover_prep.py` were applied, and `INDI_GMAIL_READS=true` is on.
+Steps 6-7 are now written too, off by default, as `INDI_DRIVE_RECORDS`:
+`drive_tables.py` keeps the journal, costs, reminders, newsletter lists and
+a new Decisions log as CSV files in Drive, behind the same Sheets-shaped
+calls the code already makes, and `move_records_to_drive.py` copies them
+over once. The project owner chose Drive for costs, reminders and the
+newsletter as well as the journal. `note` and `rationale` go to the
+Decisions file rather than into the Journal itself, so the heartbeat's
+journal stays Indi's own notes. What remains of step 7 after that is
+dropping the `spreadsheets` OAuth scope, which needs a re-authorisation.
+
+**Order, as originally planned:**
 
 1. `backfill_labels.py`, then `--apply`. (Status labels.)
 2. `cutover_prep.py`, then `--apply`. (Reply and outbound labels; memory.)

@@ -97,6 +97,25 @@ def gmail_reads_enabled(cfg=None) -> bool:
     return gmail_reads._setting("INDI_GMAIL_READS").lower() in _TRUE
 
 
+def drive_records_enabled(cfg=None) -> bool:
+    """INDI_DRIVE_RECORDS, default false: steps 6 and 7 of MIGRATE-GMAIL.md.
+    The journal, costs, reminders, newsletter lists and the decisions log
+    live in Drive (drive_tables.py), and nothing more is written to the
+    Queue, Responses or Outbound tabs. Needs INDI_GMAIL_READS as well."""
+    configured = getattr(cfg, "drive_records", None)
+    if isinstance(configured, bool):
+        return configured
+    return gmail_reads._setting("INDI_DRIVE_RECORDS").lower() in _TRUE
+
+
+# The why behind the mail, kept outside the mailbox: a queue row's `note`
+# (why a message was skipped or set aside, what the terms gate sent) and
+# an outbound message's `rationale`. Once records are in Drive this is
+# where they go, one row per decision, keyed by Gmail id.
+DECISIONS_TAB = "Decisions"
+DECISIONS_HEADERS = ["at", "gmail_msg_id", "kind", "status", "address", "note"]
+
+
 def _utc_now() -> datetime.datetime:
     return datetime.datetime.now(datetime.timezone.utc)
 
@@ -124,7 +143,8 @@ def _single_sender(from_raw: str) -> str:
 class GmailStore(SheetStore):
     """A SheetStore that reads mail from Gmail. See the module docstring."""
 
-    def __init__(self, sheets_service, drive_service, cfg, gmail_service):
+    def __init__(self, sheets_service, drive_service, cfg, gmail_service,
+                 records_in_drive: bool = False):
         # Labels are what this store reads, so the writes that set them are
         # always on here, whatever INDI_GMAIL_STATUS_LABELS says.
         if not getattr(cfg, "gmail_status_labels", True):
@@ -137,6 +157,76 @@ class GmailStore(SheetStore):
         self._full: dict[str, dict] = {}
         self._threads: dict[str, list[dict]] = {}
         self._known: set[str] | None = None
+        # With records in Drive, `sheets_service` is a drive_tables.DriveSheets
+        # and the mail tabs are no longer written at all: Gmail and its
+        # labels are the record of the mail, the Decisions file of the why.
+        self.records_in_drive = records_in_drive
+
+    # -- records in Drive (steps 6-7) -------------------------------------
+
+    def ensure_spreadsheets(self) -> None:
+        if not self.records_in_drive:
+            return super().ensure_spreadsheets()
+        import drive_tables
+        self.queue_id = None                 # nothing reads or writes the Queue tab
+        self.responses_id = drive_tables.RECORDS_ID
+        for tab, headers in ((sheets_queue.JOURNAL_TAB, sheets_queue.JOURNAL_HEADERS),
+                             (sheets_queue.COSTS_TAB, sheets_queue.COSTS_HEADERS),
+                             (DECISIONS_TAB, DECISIONS_HEADERS)):
+            self._ensure_tab(self.responses_id, tab, headers)
+
+    def _decision(self, gmail_msg_id: str, kind: str, status: str,
+                  address: str, note: str) -> None:
+        """Append one decision. Best effort: a Drive hiccup must not turn a
+        reply into a failure, any more than a label write may."""
+        if not note and kind == "status":
+            return
+        try:
+            self._append(self.responses_id, DECISIONS_TAB, DECISIONS_HEADERS, {
+                "at": _utc_now().isoformat(), "gmail_msg_id": gmail_msg_id,
+                "kind": kind, "status": status, "address": address,
+                "note": (note or "")[:500],
+            })
+        except Exception:
+            log.warning("Could not record the %s decision for %s.", kind,
+                        gmail_msg_id or address, exc_info=True)
+
+    def append_queue_row(self, msg: dict, status: str = sheets_queue.STATUS_QUEUED,
+                         note: str = "") -> dict:
+        if not self.records_in_drive:
+            return super().append_queue_row(msg, status, note)
+        row = {
+            "gmail_msg_id": msg["gmail_msg_id"], "thread_id": msg.get("thread_id", ""),
+            "sender": msg.get("from_raw", ""), "sender_addr": msg.get("from_addr", ""),
+            "subject": msg.get("subject", ""), "status": status, "note": note[:500],
+            "received_at": sheets_queue._received_at_iso(msg),
+        }
+        self._label_status(row["gmail_msg_id"], status)
+        self._decision(row["gmail_msg_id"], "status", status, row["sender_addr"], note)
+        return row
+
+    def set_status(self, queue_row: dict, status: str, note: str = "") -> None:
+        if not self.records_in_drive:
+            return super().set_status(queue_row, status, note)
+        queue_row["status"] = status
+        if note:
+            queue_row["note"] = note[:500]
+        msg_id = queue_row.get("gmail_msg_id", "")
+        self._label_status(msg_id, status)
+        self._decision(msg_id, "status", status, queue_row.get("sender_addr", ""), note)
+
+    def set_attachments(self, queue_row: dict, paths: list[str]) -> None:
+        if not self.records_in_drive:
+            return super().set_attachments(queue_row, paths)
+        # The attachment store is keyed by message id already; nothing to add.
+
+    def append_response(self, gmail_msg_id: str, sender_addr: str, text: str,
+                        reply_id: str = "") -> None:
+        if not self.records_in_drive:
+            return super().append_response(gmail_msg_id, sender_addr, text,
+                                           reply_id=reply_id)
+        # The reply is in Gmail, in the thread; the label marks it as Indi's.
+        self._label_add(reply_id, LABEL_REPLY)
 
     # -- Gmail plumbing ---------------------------------------------------
 
@@ -406,8 +496,12 @@ class GmailStore(SheetStore):
 
     def append_outbound(self, recipient: str, subject: str, body: str,
                         rationale: str, message_id: str = "") -> None:
-        super().append_outbound(recipient, subject, body, rationale,
-                                message_id=message_id)
+        if self.records_in_drive:
+            self._label_add(message_id, LABEL_OUTBOUND)
+            self._decision(message_id, "outbound", "", recipient, rationale)
+        else:
+            super().append_outbound(recipient, subject, body, rationale,
+                                    message_id=message_id)
         if self._known is not None and recipient.strip():
             self._known.add(recipient.strip().casefold())
 

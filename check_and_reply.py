@@ -80,7 +80,9 @@ import costs
 import gmail_io
 import gmail_reads
 import drive_tables
+import audience
 import gmail_store
+import reply_all
 import local_tools
 import locking
 import memory_file
@@ -321,6 +323,13 @@ def mark_as_read(gmail, msg_id: str) -> None:
     ).execute()
 
 
+def _meta_of(raw: dict) -> dict:
+    """The From/To/Cc of a full Gmail message, as audience.py reads them."""
+    hdrs = gmail_reads._headers(raw)
+    return {"from": hdrs.get("from", ""), "to": hdrs.get("to", ""),
+            "cc": hdrs.get("cc", "")}
+
+
 def build_store(cfg: Config, gmail, drive, sheets):
     """The store for this configuration (see MIGRATE-GMAIL.md): Gmail and
     Drive records, Gmail with the sheet, or the sheet alone."""
@@ -406,7 +415,8 @@ def redundant_pending_ids(pending_rows: list[dict], thread_ids: set[str],
 
 def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.SheetStore,
                     raw_message: dict, selves: set[str], system_prompt: str,
-                    people: correspondents.CorrespondentStore) -> str:
+                    people: correspondents.CorrespondentStore,
+                    released_to: list[str] | None = None) -> str:
     """Handles one message end to end. Returns a short outcome string.
     Raises only on genuinely unexpected errors, which the caller records
     as `failed` so the message can be retried next run."""
@@ -489,6 +499,44 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
         mark_as_read(gmail, msg["gmail_msg_id"])
         return f"newsletter: {unsubscribed}"
 
+    # --- who the reply goes to (reply_all.py) --------------------------
+    # The sender, and with INDI_REPLY_ALL everyone else on the To and Cc.
+    # Nobody is written to before accepting the terms: if anyone hasn't,
+    # they are sent the terms and the message waits, uncomposed, until
+    # they have answered or 72 hours pass. `released_to` is that later
+    # run, with the people who accepted.
+    reply_all_on = reply_all.enabled(cfg) and getattr(store, "supports_audience", False)
+    if released_to is not None:
+        others = [a for a in released_to if a != sender]
+    else:
+        _, others = reply_all.recipients_for(raw_message, msg, selves, people,
+                                             reply_all_on)
+        waiting = reply_all.undecided(others, people)
+        if waiting:
+            log.info("Waiting for %s to accept the terms before replying.",
+                     ", ".join(waiting))
+            if cfg.dry_run:
+                return f"would send the terms to {', '.join(waiting)} and wait"
+            if reply_all.waiting_for(store, msg["gmail_msg_id"]) is None:
+                for addr in waiting:
+                    log.info("Terms to %s: %s", addr,
+                             reply_all.paper(cfg, gmail, people, addr, msg))
+                reply_all.hold(store, msg, sender, others)
+            note = f"awaiting terms from {', '.join(waiting)}"
+            if existing:
+                store.set_status(existing, sheets_queue.STATUS_QUEUED, note)
+            else:
+                store.append_queue_row(msg, sheets_queue.STATUS_QUEUED, note)
+            mark_as_read(gmail, msg["gmail_msg_id"])
+            return note
+        others = [a for a in others if reply_all.accepted(a, people)]
+    # The sender's own address stands for them here even if they set a
+    # Reply-To: audience.py knows them by the address they wrote from.
+    recipients = frozenset({sender.lower(), *others})
+    if others:
+        log.info("Reply goes to %s, copying %s.", msg["reply_to_addr"] or sender,
+                 ", ".join(others))
+
     trusted = cfg.is_trusted(sender)
     scope_all_history = cfg.may_search_all_history(sender)
     # "*" in INDI_HISTORY_ALL_SENDERS used to mean everyone could search
@@ -501,6 +549,11 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
         if not scope_all_history:
             log.info("INDI_HISTORY_ALL_SENDERS='*' is ignored: history search is "
                      "scoped by who has seen each message.")
+    if scope_all_history and others:
+        # Unrestricted search is for a reply that goes to its owner alone;
+        # with others on it, it could put their mail in front of people
+        # who never saw it.
+        scope_all_history = False
 
     # Privileged tiers are granted by address, and a From header is free
     # text. Verify the message actually came from that domain before
@@ -593,6 +646,17 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
     if cfg.max_thread_chars > 0 and cfg.max_thread_messages > 0:
         try:
             thread_messages = get_thread_messages(gmail, msg["thread_id"])
+            # Only what everyone on the reply has already seen: someone
+            # copied in partway through a thread never received its
+            # earlier messages (audience.py).
+            visible = [m for m in thread_messages
+                       if audience.cleared(m.get("id", ""), _meta_of(m), recipients,
+                                           selves, None)]
+            if len(visible) < len(thread_messages):
+                log.info("Thread context: %d earlier message(s) left out — not "
+                         "seen by everyone on the reply.",
+                         len(thread_messages) - len(visible))
+            thread_messages = visible
             thread_text, thread_count = gmail_io.format_thread_context(
                 thread_messages,
                 exclude_msg_id=msg["gmail_msg_id"],
@@ -646,8 +710,11 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
     try:
         reply_text, stats = claude_api.generate_reply(
             claude, cfg, system_prompt, msg,
-            memory_body=memory.body,
-            pending_text=pending,
+            # A person's memory file and unfolded exchanges are theirs;
+            # with anyone else on the reply they stay out of view.
+            memory_body="" if others else memory.body,
+            pending_text="" if others else pending,
+            recipients=recipients,
             store=store,
             trusted=trusted,
             scope_all_history=scope_all_history,
@@ -740,6 +807,8 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
     if cfg.dry_run:
         print("\n" + "=" * 70)
         print(f"TO:      {msg['reply_to_raw']}")
+        if others:
+            print(f"CC:      {', '.join(others)}")
         print(f"SUBJECT: Re: {msg['subject']}")
         print("-" * 70)
         print(clean_body)
@@ -755,6 +824,7 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
         in_reply_to=msg["message_id"],
         references=msg["references"],
         attachments=safe_attachments,
+        cc=others,
     )
     mime["threadId"] = msg["thread_id"]
 
@@ -988,6 +1058,22 @@ def main() -> int:
                     log.info("Reminder: %s", outcome)
             except Exception:
                 log.error("Reminder delivery failed", exc_info=True)
+
+        # Replies that were waiting for someone to accept the terms, now
+        # ready: everyone answered, or 72 hours passed (reply_all.py).
+        if not args.message_id and not cfg.dry_run:
+            try:
+                for row, kept in reply_all.due(store, people):
+                    dropped = [a for a in (row.get("recipients") or "").split(", ")
+                               if a and a not in kept]
+                    reply_all.mark_released(store, row, kept, dropped)
+                    detail = get_detail(gmail, row["gmail_msg_id"])
+                    outcome = process_message(gmail, drive, claude, cfg, store, detail,
+                                              selves, system_prompt, people,
+                                              released_to=kept)
+                    log.info("Released after the terms wait: %s", outcome)
+            except Exception:
+                log.error("Releasing waiting replies failed", exc_info=True)
 
         if args.message_id:
             ids = [{"id": args.message_id}]

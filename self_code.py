@@ -69,6 +69,7 @@ PROTECTED_FILES = {
     "terms.py",          # which agreement is in force
     "correspondents.py", # who accepted it, and when
     "audience.py",       # who may see which message (Phase 2)
+    "reply_all.py",      # who a reply goes to, and papering first
 }
 
 # data/ holds the Terms of Service themselves and the record of who has

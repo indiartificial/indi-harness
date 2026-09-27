@@ -460,7 +460,7 @@ def build_attachment_blocks(gmail, cfg, msg: dict, client, trusted: bool):
 def build_tools(cfg, trusted: bool, have_store: bool,
                 local_runner=None, scope_all_history: bool = False,
                 self_code_runner=None, claude_code_runner=None,
-                reminder_sender: str = "") -> tuple[list[dict], list[str]]:
+                reminder_sender: str = "", shared_reply: bool = False) -> tuple[list[dict], list[str]]:
     """Returns (tools, betas). Trust gates the dangerous ones."""
     tools: list[dict] = []
     want_fetch = False
@@ -502,7 +502,10 @@ def build_tools(cfg, trusted: bool, have_store: bool,
     # correspondent who may only search their own thread may only see the
     # files from their own thread. The store lives on disk rather than in
     # the sheets, so it does not need `have_store`.
-    if cfg.enable_history_search and getattr(cfg, "store_attachments", False):
+    # Not with others on the reply: the store is scoped by sender, and a
+    # sender's files are theirs, not the thread's.
+    if cfg.enable_history_search and getattr(cfg, "store_attachments", False) \
+            and not shared_reply:
         tools.extend(attachments.schemas(scoped_to_sender=not scope_all_history))
 
     # Reminders. Offered to everyone Indi replies to, not just trusted
@@ -855,13 +858,18 @@ def generate_reply(client, cfg, system_prompt: str, msg: dict,
                    attachment_blocks=None, local_runner=None,
                    scope_all_history: bool = False,
                    self_code_runner=None, claude_code_runner=None,
-                   thread_text: str = "", quoted_text: str = "") -> tuple[str, dict]:
+                   thread_text: str = "", quoted_text: str = "",
+                   recipients=None) -> tuple[str, dict]:
     """Returns (reply_text, stats). stats["set_aside"] is set to the stated
     reason if Indi chose not to reply at all."""
+    sender_only = frozenset({(msg.get("from_addr") or "").lower()} - {""})
+    recipients = frozenset(r.lower() for r in (recipients or sender_only))
+    shared = bool(recipients - sender_only - {(msg.get("reply_to_addr") or "").lower()})
     tools, betas = build_tools(cfg, trusted, store is not None, local_runner,
                                scope_all_history, self_code_runner,
                                claude_code_runner,
-                               reminder_sender=msg["from_addr"])
+                               reminder_sender=msg["from_addr"],
+                               shared_reply=shared)
 
     system_blocks = [{
         "type": "text",
@@ -870,6 +878,14 @@ def generate_reply(client, cfg, system_prompt: str, msg: dict,
     }]
 
     user_blocks: list[dict] = []
+    if shared:
+        user_blocks.append({
+            "type": "text",
+            "text": ("[This reply goes to everyone on the thread: "
+                     + ", ".join(sorted(recipients)) + ". Write for all of "
+                     "them. You have been shown only what all of them have "
+                     "already seen.]"),
+        })
     if memory_body.strip():
         user_blocks.append({
             "type": "text",
@@ -958,8 +974,7 @@ def generate_reply(client, cfg, system_prompt: str, msg: dict,
     restrict_to = "" if scope_all_history else msg["from_addr"]
     # Phase 2: who the reply goes to. Today that is the sender alone; the
     # search shows only what all of them have already seen (audience.py).
-    cleared_for = (None if scope_all_history
-                   else frozenset({(msg.get("from_addr") or "").lower()} - {""}))
+    cleared_for = None if scope_all_history else recipients
 
     # The rolling breakpoint: whichever tool-result block currently carries
     # one. Cleared before the next is set, so the request never holds more

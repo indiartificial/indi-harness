@@ -593,7 +593,7 @@ def _attachment_part(filename: str, content: str):
 
 def build_reply_mime(to_addr: str, subject: str, body: str, in_reply_to: str,
                      references: str = "", attachments=None,
-                     from_addr: str = "") -> dict:
+                     from_addr: str = "", cc=None) -> dict:
     """Returns the Gmail API message body dict (without threadId — the
     caller adds it, so this function stays testable on its own)."""
     if not subject:
@@ -611,6 +611,8 @@ def build_reply_mime(to_addr: str, subject: str, body: str, in_reply_to: str,
         msg = MIMEText(body, _charset="utf-8")
 
     msg["To"] = to_addr
+    if cc:
+        msg["Cc"] = ", ".join(cc)
     msg["Subject"] = subject
     if from_addr:
         msg["From"] = from_addr

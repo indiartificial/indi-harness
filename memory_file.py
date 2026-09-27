@@ -338,7 +338,10 @@ class SenderMemory:
         self.raw = raw
 
     def folded_ids(self, store: "sheets_queue.SheetStore") -> frozenset:
-        """Gmail ids already folded into this sender's memory file."""
+        """Gmail ids already folded into this sender's memory file. Only a
+        v1 count needs the store's list to resolve; a v2 id set is final."""
+        if self.watermark.ids is not None:
+            return self.watermark.ids
         return self.watermark.resolve(store.messages_for_sender(self.sender_addr))
 
     def pending_rows(self, store: "sheets_queue.SheetStore",
@@ -350,8 +353,14 @@ class SenderMemory:
         context. Consolidation passes nothing, so the memory file still
         ends up covering every message.
         """
-        rows = store.messages_for_sender(self.sender_addr)
-        folded = self.watermark.resolve(rows)
+        if self.watermark.ids is not None:
+            # Known ids: let the store leave them out, so the Gmail store
+            # doesn't fetch the bodies of everything already in memory.
+            folded = self.watermark.ids
+            rows = store.messages_for_sender(self.sender_addr, exclude_ids=folded)
+        else:
+            rows = store.messages_for_sender(self.sender_addr)
+            folded = self.watermark.resolve(rows)
         rows = [r for r in rows if r.get("gmail_msg_id") not in folded]
         if exclude_msg_ids:
             excluded = set(exclude_msg_ids)
@@ -363,7 +372,7 @@ class SenderMemory:
         rows = self.pending_rows(store, exclude_msg_ids=exclude_msg_ids)
         if not rows:
             return ""
-        return sheets_queue.format_exchanges(rows, store.responses_by_message())
+        return sheets_queue.format_exchanges(rows, store.responses_for(rows))
 
 
 # ---------------------------------------------------------------------------
@@ -384,7 +393,7 @@ def consolidate(client, cfg, drive_service, store, sender_addr: str) -> bool:
     if len(pending) < cfg.memory_batch_size:
         return False
 
-    recent_text = sheets_queue.format_exchanges(pending, store.responses_by_message())
+    recent_text = sheets_queue.format_exchanges(pending, store.responses_for(pending))
     user_content = (
         "=== CURRENT MEMORY FILE ===\n"
         f"{memory.body if memory.body.strip() else '(empty — no memory file yet)'}\n\n"

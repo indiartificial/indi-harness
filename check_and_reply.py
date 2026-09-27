@@ -79,6 +79,7 @@ import correspondents
 import costs
 import gmail_io
 import gmail_reads
+import gmail_store
 import local_tools
 import locking
 import memory_file
@@ -713,11 +714,15 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
     mime["threadId"] = msg["thread_id"]
 
     if cfg.send_automatically:
-        gmail.users().messages().send(userId="me", body=mime).execute()
+        result = gmail.users().messages().send(userId="me", body=mime).execute()
         outcome = "sent"
+        reply_id = (result or {}).get("id", "")
     else:
-        gmail.users().drafts().create(userId="me", body={"message": mime}).execute()
+        result = gmail.users().drafts().create(userId="me", body={"message": mime}).execute()
         outcome = "drafted"
+        # A draft's own id is not a message id; the message inside it is
+        # what carries labels and turns up in the thread.
+        reply_id = ((result or {}).get("message") or {}).get("id", "")
 
     # --- after the mail has gone ----------------------------------------
     # Everything below this line runs with a reply already in the world,
@@ -755,7 +760,8 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
     # The response row is written only now, after the mail actually went
     # somewhere, so the sheets never claim a reply that doesn't exist.
     try:
-        store.append_response(msg["gmail_msg_id"], sender, clean_body)
+        store.append_response(msg["gmail_msg_id"], sender, clean_body,
+                              reply_id=reply_id)
     except Exception:
         log.warning("Could not record the response for %s.", sender,
                     exc_info=True)
@@ -894,14 +900,21 @@ def main() -> int:
                      "(web fetch, code execution, cross-sender history) are off "
                      "for everyone.")
 
-        store = sheets_queue.SheetStore(
-            sheets, drive, cfg,
-            gmail_service=gmail if cfg.gmail_status_labels else None,
-            # Comparison logging only (MIGRATE-GMAIL.md, step 3); off by
-            # default, and the sheet still answers every read either way.
-            shadow_gmail_service=(gmail if gmail_reads.shadow_reads_enabled(cfg)
-                                  else None),
-        )
+        if gmail_store.gmail_reads_enabled(cfg):
+            # Step 5 of MIGRATE-GMAIL.md: Gmail answers every read about
+            # mail; the sheet is still written, and still answers for the
+            # journal, costs, reminders and newsletter.
+            store = gmail_store.GmailStore(sheets, drive, cfg, gmail)
+            log.info("Mail reads come from Gmail (INDI_GMAIL_READS).")
+        else:
+            store = sheets_queue.SheetStore(
+                sheets, drive, cfg,
+                gmail_service=gmail if cfg.gmail_status_labels else None,
+                # Comparison logging only (MIGRATE-GMAIL.md, step 3); off by
+                # default, and the sheet still answers every read either way.
+                shadow_gmail_service=(gmail if gmail_reads.shadow_reads_enabled(cfg)
+                                      else None),
+            )
         store.ensure_spreadsheets()
 
         # Who has accepted the terms. Local, and read-only under

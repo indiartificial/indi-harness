@@ -54,12 +54,17 @@ class FakeStore:
             for n, i in enumerate(ids)
         ]
 
-    def messages_for_sender(self, sender_addr):
+    def messages_for_sender(self, sender_addr, exclude_ids=None):
         assert sender_addr == ALICE
-        return list(self.rows)
+        excluded = set(exclude_ids or ())
+        return [r for r in self.rows if r["gmail_msg_id"] not in excluded]
 
     def responses_by_message(self):
         return {r["gmail_msg_id"]: [f"reply to {r['gmail_msg_id']}"] for r in self.rows}
+
+    def responses_for(self, rows):
+        wanted = {r["gmail_msg_id"] for r in rows}
+        return {k: v for k, v in self.responses_by_message().items() if k in wanted}
 
 
 @pytest.fixture

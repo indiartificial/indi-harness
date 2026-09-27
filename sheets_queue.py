@@ -96,6 +96,15 @@ STATUS_LABELS = {
     STATUS_IGNORED: "Indi/Ignored",
 }
 
+# Two more labels, on Indi's own mail rather than on what it received:
+# its replies (sent, or drafted when INDI_SEND_AUTOMATICALLY is off) and
+# the messages it starts on a heartbeat. Written beside the Responses and
+# Outbound rows the same best-effort way as the status labels, so that by
+# the time the Gmail readers answer (MIGRATE-GMAIL.md, step 5), the rate
+# limit and the outbound budgets have history to count.
+LABEL_REPLY = "Indi/Reply"
+LABEL_OUTBOUND = "Indi/Outbound"
+
 # Indi's own outbound-initiated messages and its journal entries. Both are
 # separate tabs in the Responses spreadsheet so the reply pipeline and the
 # initiative pipeline can't be confused for one another.
@@ -536,6 +545,17 @@ class SheetStore:
             log.warning("Could not set label %s on %s; the sheet has the "
                         "status regardless.", name, gmail_msg_id, exc_info=True)
 
+    def _label_add(self, gmail_msg_id: str, name: str) -> None:
+        """Add one label to one of Indi's own messages. Best-effort, for
+        the same reasons as `_label_status`."""
+        if self._labeler is None or not gmail_msg_id:
+            return
+        try:
+            self._labeler.apply(gmail_msg_id, name, ())
+        except Exception:
+            log.warning("Could not set label %s on %s; the sheet has the "
+                        "record regardless.", name, gmail_msg_id, exc_info=True)
+
     def set_attachments(self, queue_row: dict, paths: list[str]) -> None:
         """Record which stored attachments belong to this message.
 
@@ -560,7 +580,11 @@ class SheetStore:
             body={"values": [[value]]},
         ).execute()
 
-    def append_response(self, gmail_msg_id: str, sender_addr: str, text: str) -> None:
+    def append_response(self, gmail_msg_id: str, sender_addr: str, text: str,
+                        reply_id: str = "") -> None:
+        """Record a reply. `reply_id` is the Gmail id of the reply itself
+        (the sent message, or the draft's message); given one, it is
+        labelled Indi/Reply after the row is written."""
         if len(text) > self.cfg.max_body_chars:
             text = text[: self.cfg.max_body_chars] + "\n[... truncated for storage ...]"
         self._append(
@@ -572,6 +596,7 @@ class SheetStore:
                 "created_at": _now_iso(),
             },
         )
+        self._label_add(reply_id, LABEL_REPLY)
 
     # -- queries -----------------------------------------------------------
 
@@ -583,15 +608,33 @@ class SheetStore:
             )
         return out
 
-    def messages_for_sender(self, sender_addr: str) -> list[dict]:
-        """That sender's replied-to messages, oldest first."""
+    def messages_for_sender(self, sender_addr: str,
+                            exclude_ids=None) -> list[dict]:
+        """That sender's replied-to messages, oldest first, less any whose
+        id is in `exclude_ids` (memory passes the ids it has folded, which
+        spares the Gmail store fetching bodies it would throw away)."""
         rows = [
             r for r in self.queue_rows()
             if r.get("sender_addr", "").lower() == sender_addr.lower()
             and r.get("status") == STATUS_REPLIED
         ]
         rows.sort(key=lambda r: r.get("received_at", ""))
+        if exclude_ids:
+            excluded = set(exclude_ids)
+            rows = [r for r in rows if r.get("gmail_msg_id") not in excluded]
         return rows
+
+    def responses_for(self, rows: list[dict]) -> dict[str, list[str]]:
+        """The replies to just these rows, grouped as `responses_by_message`
+        groups them. What callers holding a handful of rows should ask for:
+        the Gmail store reads only those rows' threads."""
+        wanted = {r.get("gmail_msg_id", "") for r in rows} - {""}
+        return {k: v for k, v in self.responses_by_message().items() if k in wanted}
+
+    def recent_messages(self, n: int) -> list[dict]:
+        """The last `n` handled messages, any status, oldest first."""
+        rows = sorted(self.queue_rows(), key=lambda r: r.get("received_at", ""))
+        return rows[-n:] if n > 0 else []
 
     def replies_in_last_day(self, sender_addr: str) -> int:
         now = datetime.datetime.now(datetime.timezone.utc)
@@ -700,7 +743,7 @@ def _outbound_methods():
         return self._load(self.responses_id, JOURNAL_TAB)
 
     def append_outbound(self, recipient: str, subject: str, body: str,
-                        rationale: str) -> None:
+                        rationale: str, message_id: str = "") -> None:
         self._append(self.responses_id, OUTBOUND_TAB, OUTBOUND_HEADERS, {
             "recipient": recipient,
             "subject": subject[:500],
@@ -708,6 +751,7 @@ def _outbound_methods():
             "rationale": rationale[:500],
             "created_at": _now_iso(),
         })
+        self._label_add(message_id, LABEL_OUTBOUND)
 
     def append_journal(self, entry: str) -> None:
         self._append(self.responses_id, JOURNAL_TAB, JOURNAL_HEADERS, {
@@ -741,6 +785,11 @@ def _outbound_methods():
     def journal_today(self) -> int:
         return self._count_since(self.journal_rows(), 24)
 
+    def recent_outbound(self, n: int) -> list[dict]:
+        """The last `n` messages Indi started, oldest first."""
+        rows = sorted(self.outbound_rows(), key=lambda r: r.get("created_at", ""))
+        return rows[-n:] if n > 0 else []
+
     def recent_journal(self, limit: int = 10) -> list[dict]:
         rows = sorted(self.journal_rows(), key=lambda r: r.get("created_at", ""))
         return rows[-limit:]
@@ -765,7 +814,7 @@ def _outbound_methods():
 
     for fn in (outbound_rows, journal_rows, append_outbound, append_journal,
                _count_since, outbound_today, outbound_today_to, journal_today,
-               recent_journal, known_correspondents):
+               recent_outbound, recent_journal, known_correspondents):
         setattr(SheetStore, fn.__name__, fn)
 
 

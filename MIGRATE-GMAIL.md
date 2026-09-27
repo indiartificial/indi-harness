@@ -4,9 +4,60 @@ The Queue and Responses spreadsheets duplicate data Gmail already holds.
 This is a sketch of what it takes to drop them, what genuinely can't move,
 and the three places where a naive port breaks something quietly.
 
-Steps 0, 1, 2 and 3 of the order of work below are done; the cutover
-itself has not started. Every reader still reads the sheet — the Gmail
-readers of step 3 only run in its shadow and log disagreements.
+Steps 0–3 of the order of work below are done, and the code for step 5
+is written but switched off (`INDI_GMAIL_READS=false`). Every reader
+still reads the sheet until that flag is turned on.
+
+## Where this stands (read this first)
+
+**In code, off by default:** `gmail_store.GmailStore`, a `SheetStore`
+whose readers ask Gmail and whose writers still write the sheet and the
+labels. It covers *every* reader of mail, not just the three shadowed in
+step 3: status, `messages_for_sender`, replies, `replies_in_last_day`,
+`known_correspondents`, the outbound budgets, the heartbeat's recent
+context, and search. `claude_api.history_search_schema` switches its
+description with the same flag, and a search that raises now returns an
+"unavailable" tool result instead of failing the reply.
+
+**Two more labels, written now alongside the sheet:** `Indi/Reply` on
+each reply Indi sends or drafts, and `Indi/Outbound` on heartbeat mail.
+`cutover_prep.py` backfills both from the Responses and Outbound tabs.
+
+**The rate-limit question from step 3, decided:** `replies_in_last_day`
+counts `Indi/Reply` messages to that address in the exact rolling 24h,
+drafts included. That is what the sheet counted (reply rows), and it
+avoids both problems noted below — Sent-only counts nothing while replies
+are drafts, and Sent-wholesale counts heartbeat mail. The shadow reader
+in `gmail_reads.py` still counts Sent, so expect its lines for this
+reader to keep disagreeing; the step 5 reader is the one to check.
+
+**known_correspondents, decided the same way:** senders of
+`Indi/Replied`/`Indi/Ignored` mail plus recipients of `Indi/Outbound`
+mail — the sheet's own three sources. `INDI_START_DATE` is only used by
+the step 3 shadow.
+
+**Memory before the flip:** `cutover_prep.py --apply` rewrites every v1
+memory file as v2, resolving `folded: N` against the *sheet's* order now,
+instead of waiting for each correspondent to trigger a consolidation.
+
+**Order, from here:**
+
+1. `backfill_labels.py`, then `--apply`. (Status labels.)
+2. `cutover_prep.py`, then `--apply`. (Reply and outbound labels; memory.)
+3. `INDI_GMAIL_SHADOW_READS=true` for a few days of real mail; read the
+   WARNING lines in `log.txt`. Search and known-correspondents should
+   now agree apart from the expected word-vs-substring differences.
+4. `INDI_GMAIL_READS=true`. The sheet is still written; set it back to
+   false to undo.
+5. Steps 6 and 7 below are not written yet. Note that the Costs,
+   Reminders and newsletter tabs live in the same spreadsheet and are not
+   mentioned in step 6, so dropping the `spreadsheets` scope at step 7
+   needs a home for them too.
+
+**Protection.** `gmail_store.py` and `gmail_reads.py` now hold the
+history-search sender scope that `sheets_queue.py` held. Neither is in
+`self_code.PROTECTED_FILES` (nor was `sheets_queue.py`). Worth deciding
+before the flip.
 
 ## What moves where
 

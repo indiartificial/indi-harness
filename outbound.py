@@ -1188,8 +1188,8 @@ def handle_reply_cancel_reminder(cfg, store, sender: str,
 
 def _context(cfg, store) -> str:
     """What Indi knows going into a heartbeat."""
-    recent = sorted(store.queue_rows(), key=lambda r: r.get("received_at", ""))[-8:]
-    replies = store.responses_by_message()
+    recent = store.recent_messages(8)
+    replies = store.responses_for(recent)
     parts = []
 
     if recent:
@@ -1202,7 +1202,7 @@ def _context(cfg, store) -> str:
             f"[{row.get('created_at', '')}]\n{row.get('entry', '')}" for row in journal
         ))
 
-    sent = sorted(store.outbound_rows(), key=lambda r: r.get("created_at", ""))[-5:]
+    sent = store.recent_outbound(5)
     if sent:
         parts.append("=== MESSAGES YOU STARTED RECENTLY ===\n" + "\n\n".join(
             f"[{r.get('created_at','')}] to {r.get('recipient','')} — "
@@ -1394,13 +1394,15 @@ def _send(client, cfg, gmail, store, payload: dict, recipients: list[str],
     mime = _rebuild_subject(mime, subject)
 
     if cfg.send_automatically:
-        gmail.users().messages().send(userId="me", body=mime).execute()
+        result = gmail.users().messages().send(userId="me", body=mime).execute()
         outcome = "sent"
+        message_id = (result or {}).get("id", "")
     else:
-        gmail.users().drafts().create(userId="me", body={"message": mime}).execute()
+        result = gmail.users().drafts().create(userId="me", body={"message": mime}).execute()
         outcome = "drafted"
+        message_id = ((result or {}).get("message") or {}).get("id", "")
 
-    store.append_outbound(to_addr, subject, body, rationale)
+    store.append_outbound(to_addr, subject, body, rationale, message_id=message_id)
     log.info("Outbound message %s to %s — %s", outcome, to_addr, rationale[:120])
     return f"{outcome} new message to {to_addr}"
 

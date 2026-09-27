@@ -139,9 +139,9 @@ class FakeStore:
     def replies_in_last_day(self, sender):
         return 0
 
-    def append_response(self, msg_id, sender, body):
+    def append_response(self, msg_id, sender, body, reply_id=""):
         self._maybe_raise("append_response")
-        self.responses.append((msg_id, sender, body))
+        self.responses.append((msg_id, sender, body, reply_id))
 
     def set_attachments(self, row, paths):
         self._maybe_raise("set_attachments")
@@ -303,6 +303,8 @@ def test_a_reply_with_an_attachment_gets_all_the_way_through(
     assert gmail.read == ["m1"]
     assert store.rows[0]["status"] == sheets_queue.STATUS_REPLIED
     assert store.responses and store.responses[0][1] == SENDER
+    # The sent reply's own Gmail id reaches the store, which labels it.
+    assert store.responses[0][3] == "x"
 
 
 def test_a_reply_without_an_attachment_is_unchanged(tmp_path, people, reply):

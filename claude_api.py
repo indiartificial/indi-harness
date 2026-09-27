@@ -66,6 +66,7 @@ import re
 
 import attachments
 import costs
+import gmail_store
 import outbound
 import sheets_queue
 
@@ -156,40 +157,45 @@ def _clear_cache_point(block: dict | None) -> None:
         block.pop("cache_control", None)
 
 
-def history_search_schema(scoped_to_sender: bool) -> dict:
+def history_search_schema(scoped_to_sender: bool, gmail_search: bool = False) -> dict:
+    """The history-search tool. Its description has to match whichever
+    store answers (MIGRATE-GMAIL.md, step 5): the sheet does substring
+    matching, Gmail matches whole words. Describing one while the other
+    answers makes the model write queries that silently find nothing."""
     scope_note = (
         " Results are limited to messages from the person you are currently "
         "replying to."
         if scoped_to_sender else ""
     )
-    # TODO(MIGRATE-GMAIL.md, step 5): rewrite this description when the
-    # search reader flips to Gmail. It describes the Sheets search, which is
-    # still the one answering (the Gmail search only runs as a shadow, step
-    # 3). Gmail tokenises — "auth" will no longer find "authentication" —
-    # and it adds from:, subject:, newer_than: and negation. Change it
-    # before step 5, not after, or the model writes substring queries that
-    # silently return nothing.
+    if gmail_search:
+        matching = (
+            "Matching is Gmail search over subject and body: whole words, and "
+            "every word must appear — 'auth' will not find 'authentication', "
+            "so search for the full word. Gmail operators such as subject:, "
+            "newer_than:7d or older_than:1y work too."
+        )
+        query_help = "Words (and optionally Gmail operators) to search for."
+        sender_help = "Part of the sender's address or name."
+    else:
+        matching = (
+            "Matching is a case-insensitive substring search over subject and "
+            "body; it does not support boolean operators or date ranges."
+        )
+        query_help = "Substring to look for in past subjects/bodies."
+        sender_help = "Substring match on the sender address or name."
     return {
         "name": HISTORY_SEARCH_TOOL_NAME,
         "description": (
             "Search past emails Indi has processed (subject/body text and/or "
             "sender address) and the replies that were sent. Use this when the "
             "current email refers to an earlier exchange that isn't already in "
-            "the background memory you were given. Matching is a "
-            "case-insensitive substring search over subject and body; it does "
-            "not support boolean operators or date ranges." + scope_note
+            "the background memory you were given. " + matching + scope_note
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "Substring to look for in past subjects/bodies.",
-                },
-                "sender": {
-                    "type": "string",
-                    "description": "Substring match on the sender address or name.",
-                },
+                "query": {"type": "string", "description": query_help},
+                "sender": {"type": "string", "description": sender_help},
             },
         },
     }
@@ -477,7 +483,10 @@ def build_tools(cfg, trusted: bool, have_store: bool,
     tools.append(SET_ASIDE_SCHEMA)
 
     if cfg.enable_history_search and have_store:
-        tools.append(history_search_schema(scoped_to_sender=not scope_all_history))
+        tools.append(history_search_schema(
+            scoped_to_sender=not scope_all_history,
+            gmail_search=gmail_store.gmail_reads_enabled(cfg),
+        ))
 
     # The attachment store. Offered to exactly the senders who get the
     # history search, and scoped the same way they are scoped there: a
@@ -533,12 +542,19 @@ def build_tools(cfg, trusted: bool, have_store: bool,
 
 
 def _run_history_search(store, cfg, tool_input: dict, restrict_to: str) -> str:
-    results = store.search(
-        query=tool_input.get("query", ""),
-        sender=tool_input.get("sender", ""),
-        limit=cfg.max_history_search_results,
-        restrict_to_sender=restrict_to,
-    )
+    try:
+        results = store.search(
+            query=tool_input.get("query", ""),
+            sender=tool_input.get("sender", ""),
+            limit=cfg.max_history_search_results,
+            restrict_to_sender=restrict_to,
+        )
+    except Exception:
+        # With Gmail answering, a malformed query or a Gmail hiccup would
+        # otherwise raise out of the tool loop and fail the whole reply.
+        log.warning("History search failed.", exc_info=True)
+        return ("History search is unavailable right now; answer from what "
+                "you already have.")
     if not results:
         return "No matching past messages found."
     blocks = []

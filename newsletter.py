@@ -666,17 +666,26 @@ automatically; you don't need to write one."""
 
 
 def run_issue(client, cfg, gmail, store, system_prompt: str, model: str,
-              people=None, context: str = "") -> str:
+              people=None, context: str = "", agenda_owner: str = "",
+              topics=None) -> str:
     """Ask the model for today's issue and send what it writes.
 
     Split out from `outbound.run_heartbeat` rather than folded into it so
     that the mandated run and the ordinary one cannot drift into sharing
     a prompt: this one is told it has a job, and it is offered exactly
     one tool with which to do it.
+
+    With `topics` — pending newsletter_topic items from `agenda_owner`'s
+    agenda — the run goes through `_run_issue_with_agenda` instead. Without
+    them, nothing below this line differs from before the agenda existed.
     """
     recipients = eligible_recipients(cfg, store, people)
     if not recipients:
         return "newsletter skipped: nobody is subscribed"
+    if topics and agenda_owner:
+        return _run_issue_with_agenda(client, cfg, gmail, store, system_prompt,
+                                      model, people, context, recipients,
+                                      agenda_owner, topics)
 
     with client.messages.stream(
         model=model,
@@ -703,6 +712,113 @@ def run_issue(client, cfg, gmail, store, system_prompt: str, model: str,
                 "the next heartbeat will try again")
 
     return send_issue(cfg, gmail, store, calls[0].input, people)
+
+
+# At most this many model calls in one agenda-carrying issue run. The
+# model may mark a topic done before it sends the issue and wait for the
+# result, so one call is not always enough; a few are, and a run that has
+# not sent by then is treated like any other run that did not write one.
+MAX_AGENDA_ROUNDS = 4
+
+
+def _sent(outcome: str) -> bool:
+    """Whether `send_issue` reached anyone. Partial counts: the topic was
+    used in an issue that went out."""
+    return outcome.startswith("newsletter ") and " sent to " in outcome
+
+
+def _run_issue_with_agenda(client, cfg, gmail, store, system_prompt: str,
+                           model: str, people, context: str, recipients,
+                           owner: str, topics) -> str:
+    """The issue run when a running order has been agreed (agenda.py).
+
+    The same mandate and the same one send, plus agenda_complete and
+    agenda_add so the model can say which topic it used. Completions are
+    held until `send_issue` has actually reached someone: a topic is
+    "done" when it has been in an issue, not when the model meant to use
+    it. Additions are notes for later issues and are written straight
+    away, scoped like everything else in agenda.py to `owner`.
+    """
+    import agenda
+
+    tools = [schema(cfg, recipients), agenda.add_schema(owner),
+             agenda.complete_schema(owner)]
+    offered_ids = {(t.get("item_id") or "").lower() for t in topics}
+    messages = [{"role": "user", "content":
+                 (context or "Write today's newsletter.")
+                 + "\n\n" + agenda.newsletter_section(topics)}]
+    to_complete: list[str] = []
+    outcome = None
+
+    for _ in range(MAX_AGENDA_ROUNDS):
+        with client.messages.stream(
+            model=model,
+            max_tokens=cfg.max_tokens,
+            system=system_prompt + mandate(cfg, recipients) + agenda.NEWSLETTER_SUFFIX,
+            tools=tools,
+            messages=messages,
+        ) as streamed:
+            response = streamed.get_final_message()
+        costs.record("newsletter", model,
+                     costs.tokens_from_usage(getattr(response, "usage", None)))
+
+        calls = [b for b in response.content if getattr(b, "type", "") == "tool_use"]
+        results = []
+        for call in calls:
+            if call.name == agenda.COMPLETE_TOOL:
+                item_id = str((call.input or {}).get("item_id") or "").strip()
+                if item_id.lower() in offered_ids:
+                    to_complete.append(item_id)
+                    text, err = (f"Noted: {item_id} will be marked done once "
+                                 "the issue has gone out."), False
+                else:
+                    text, err = (f"{item_id!r} is not one of the topics in the "
+                                 "running order."), True
+            elif call.name == agenda.ADD_TOOL:
+                text, err = agenda.handle(cfg, store, owner, call.name, call.input)
+            elif call.name == NEWSLETTER_TOOL:
+                if outcome is None:
+                    outcome = send_issue(cfg, gmail, store, call.input, people)
+                    text, err = outcome, not _sent(outcome)
+                else:
+                    text, err = "Only one issue is sent per run.", True
+            else:
+                text, err = f"Unknown or unavailable tool: {call.name}", True
+            block = {"type": "tool_result", "tool_use_id": getattr(call, "id", ""),
+                     "content": text}
+            if err:
+                block["is_error"] = True
+            results.append(block)
+
+        # Stop once the issue is out, unless the model sent it first and is
+        # still mid-turn — it may be about to say which topic it used.
+        if not calls:
+            break
+        if outcome is not None and (to_complete
+                                    or getattr(response, "stop_reason", "") != "tool_use"):
+            break
+        messages.append({"role": "assistant", "content": response.content})
+        messages.append({"role": "user", "content": results})
+
+    if outcome is None:
+        text = "".join(b.text for b in response.content
+                       if getattr(b, "type", "") == "text").strip()
+        return (f"newsletter not written ({text[:200] or 'no output'}); "
+                "the next heartbeat will try again")
+
+    if _sent(outcome):
+        done = []
+        for item_id in dict.fromkeys(to_complete):
+            try:
+                if agenda.finish(store, owner, item_id, agenda.DONE) is not None:
+                    done.append(item_id)
+            except Exception:
+                log.error("Could not mark agenda item %s done", item_id, exc_info=True)
+        if done:
+            outcome += f"; agenda: marked {', '.join(done)} done"
+    elif to_complete:
+        outcome += "; agenda unchanged (the issue did not go out)"
+    return outcome
 
 
 # ---------------------------------------------------------------------------

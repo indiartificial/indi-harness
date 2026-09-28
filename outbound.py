@@ -121,6 +121,14 @@ run's job is to write and send it, and nothing else is offered. The
 mechanism, the storage and the reasons live in newsletter.py; all this
 file does is ask, first thing, whether today's issue is outstanding.
 
+THE AGENDA
+----------
+Planned work agreed with the operator — a running order of newsletter
+topics, say — lives in agenda.py. `_context` shows the operator's pending
+items to the ordinary heartbeat, and the newsletter run is handed the
+pending topics as its running order. With an empty agenda, neither run
+changes at all.
+
 Storage deliberately reuses SheetStore's generic tab primitives rather
 than adding schema to sheets_queue.py, so this feature is one file.
 
@@ -139,6 +147,7 @@ import logging
 import os
 import uuid
 
+import agenda
 import costs
 import gmail_io
 import newsletter
@@ -1216,6 +1225,13 @@ def _context(cfg, store) -> str:
             f"{r.get('recipient','')} — {r.get('subject','')}" for r in upcoming
         ))
 
+    # The operator's agenda (agenda.py). Empty means no section at all, so
+    # a heartbeat with no plan sees exactly what it saw before. Not in
+    # `_context_for`: an agenda is its owner's, not a recipient's.
+    plan = agenda.heartbeat_section(store, terms_gate.OPERATOR_ADDRESS)
+    if plan:
+        parts.append(plan)
+
     if not parts:
         parts.append("(No correspondence yet. This is a quiet start.)")
     return "\n\n".join(parts)
@@ -1336,10 +1352,17 @@ def run_heartbeat(client, cfg, gmail, store, system_prompt: str,
             # Written for everyone on the list, so drawn only from what
             # everyone on the list has seen (Phase 2).
             subscribers = set(newsletter.list_subscribers(store, cfg))
+            # The agreed running order, if there is one (agenda.py). With
+            # none, run_issue is called exactly as it always was.
+            topics = agenda.offered(store, terms_gate.OPERATOR_ADDRESS,
+                                    agenda.KIND_NEWSLETTER_TOPIC)[:agenda.MAX_SHOWN]
+            extra = ({"agenda_owner": terms_gate.OPERATOR_ADDRESS, "topics": topics}
+                     if topics else {})
             return prefix + newsletter.run_issue(
                 client, cfg, gmail, store, system_prompt,
                 heartbeat_model(cfg), people,
                 context=_context_for(cfg, store, subscribers),
+                **extra,
             )
         log.debug("No newsletter this run: %s", why)
     except Exception:

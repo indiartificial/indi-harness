@@ -1221,6 +1221,94 @@ def _context(cfg, store) -> str:
     return "\n\n".join(parts)
 
 
+def _context_for(cfg, store, recipients) -> str:
+    """What Indi may draw on when writing to these people (Phase 2): only
+    mail every one of them has already seen, the replies they saw, what
+    Indi itself wrote to them, and their pending reminders. No journal —
+    it is written from everyone's mail — and nothing from anyone else.
+
+    Used for the message a heartbeat decides to send and for the
+    newsletter, whose audience is its whole subscriber list."""
+    wanted = {r.lower() for r in recipients if r}
+    parts = []
+    recent = store.recent_messages(30)
+    if getattr(store, "supports_audience", False):
+        keep = set(store._cleared([r["gmail_msg_id"] for r in recent], wanted))
+        recent = [r for r in recent if r["gmail_msg_id"] in keep][-8:]
+        replies = store.responses_for(recent, cleared_for=wanted)
+    else:
+        # Without the audience rule, only a person's own mail is theirs.
+        only = next(iter(wanted)) if len(wanted) == 1 else None
+        recent = [r for r in recent
+                  if only and (r.get("sender_addr") or "").lower() == only][-8:]
+        replies = store.responses_for(recent) if recent else {}
+    if recent:
+        parts.append("=== CORRESPONDENCE THEY HAVE ALREADY SEEN ===\n"
+                     + sheets_queue.format_exchanges(recent, replies, max_chars_each=800))
+
+    sent = [r for r in store.recent_outbound(10)
+            if {a.strip().lower() for a in (r.get("recipient") or "").split(",") if a.strip()}
+            and wanted <= {a.strip().lower() for a in (r.get("recipient") or "").split(",")}]
+    if sent:
+        parts.append("=== MESSAGES YOU STARTED WITH THEM ===\n" + "\n\n".join(
+            f"[{r.get('created_at','')}] {r.get('subject','')}\n"
+            f"{(r.get('body','') or '')[:400]}" for r in sent[-5:]))
+
+    upcoming = [r for r in pending_reminders(store)
+                if (r.get("recipient") or "").lower() in wanted][:10]
+    if upcoming:
+        parts.append("=== THEIR REMINDERS STILL PENDING ===\n" + "\n".join(
+            f"[due {r.get('due_at','')}, {describe_repeat(r)}] — {r.get('subject','')}"
+            for r in upcoming))
+    if not parts:
+        parts.append("(Nothing on record that they have seen.)")
+    return "\n\n".join(parts)
+
+
+COMPOSE_SUFFIX = """
+
+--- WRITING TO {who} ---
+You decided on this heartbeat to {action} {who}. Below is everything you
+may draw on for it: only what {who} has already seen. Your other
+correspondence is deliberately not shown — information one person gave you
+is theirs, and does not reach anyone else through you. Write from what is
+here, or call do_nothing if, seen this way, there is no reason after all.
+Call exactly one tool."""
+
+
+def _compose_for(client, cfg, store, system_prompt: str, model: str,
+                 tool_name: str, recipient: str, budget_note: str):
+    """Phase 2: the second, per-recipient step of a heartbeat. The first
+    step chooses what to do over everyone's recent mail; its draft is
+    discarded, and the message is written here from `_context_for` alone.
+    Returns the tool call to carry out, or None for nothing."""
+    action = "write to" if tool_name == SEND_TOOL else "set a reminder for"
+    tools = [t for t in schemas(cfg, [recipient], False)
+             if t["name"] in (tool_name, NOTHING_TOOL)]
+    with client.messages.stream(
+        model=model,
+        max_tokens=cfg.max_tokens,
+        system=system_prompt + HEARTBEAT_SYSTEM_SUFFIX
+               + COMPOSE_SUFFIX.format(who=recipient, action=action),
+        tools=tools,
+        messages=[{"role": "user",
+                   "content": _context_for(cfg, store, {recipient}) + budget_note}],
+    ) as streamed:
+        response = streamed.get_final_message()
+    costs.record("heartbeat", model,
+                 costs.tokens_from_usage(getattr(response, "usage", None)))
+    calls = [b for b in response.content if getattr(b, "type", "") == "tool_use"]
+    if not calls or calls[0].name != tool_name:
+        return None
+    call = calls[0]
+    target = (call.input.get("to") or call.input.get("recipient") or "").strip().lower()
+    if target and target != recipient:
+        log.warning("Per-recipient step tried to address %s instead of %s; ignored.",
+                    target, recipient)
+        return None
+    return call
+
+
 def run_heartbeat(client, cfg, gmail, store, system_prompt: str,
                   self_addrs: set[str], people=None) -> str:
     """One heartbeat. Returns a short outcome string."""
@@ -1245,9 +1333,13 @@ def run_heartbeat(client, cfg, gmail, store, system_prompt: str,
         owed, why = newsletter.due(cfg, store, people)
         if owed:
             log.info("Newsletter: %s", why)
+            # Written for everyone on the list, so drawn only from what
+            # everyone on the list has seen (Phase 2).
+            subscribers = set(newsletter.list_subscribers(store, cfg))
             return prefix + newsletter.run_issue(
                 client, cfg, gmail, store, system_prompt,
-                heartbeat_model(cfg), people, context=_context(cfg, store),
+                heartbeat_model(cfg), people,
+                context=_context_for(cfg, store, subscribers),
             )
         log.debug("No newsletter this run: %s", why)
     except Exception:
@@ -1338,6 +1430,16 @@ def run_heartbeat(client, cfg, gmail, store, system_prompt: str,
         store.append_journal(entry)
         log.info("Journal entry written (%d chars).", len(entry))
         return prefix + "journal entry written"
+
+    if call.name in (REMINDER_TOOL, SEND_TOOL):
+        # Chosen over everyone's mail; written over the recipient's alone.
+        chosen = (call.input.get("to") or call.input.get("recipient") or "").strip().lower()
+        if not chosen:
+            return prefix + "no recipient given; skipped"
+        call = _compose_for(client, cfg, store, system_prompt, model, call.name,
+                            chosen, budget_note)
+        if call is None:
+            return prefix + f"decided against writing to {chosen} on reflection"
 
     if call.name == REMINDER_TOOL:
         return prefix + _schedule(cfg, store, call.input, recipients, self_addrs)

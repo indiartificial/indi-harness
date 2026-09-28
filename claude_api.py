@@ -859,7 +859,7 @@ def generate_reply(client, cfg, system_prompt: str, msg: dict,
                    scope_all_history: bool = False,
                    self_code_runner=None, claude_code_runner=None,
                    thread_text: str = "", quoted_text: str = "",
-                   recipients=None) -> tuple[str, dict]:
+                   recipients=None, addressed: str = "") -> tuple[str, dict]:
     """Returns (reply_text, stats). stats["set_aside"] is set to the stated
     reason if Indi chose not to reply at all."""
     sender_only = frozenset({(msg.get("from_addr") or "").lower()} - {""})
@@ -878,6 +878,11 @@ def generate_reply(client, cfg, system_prompt: str, msg: dict,
     }]
 
     user_blocks: list[dict] = []
+    if addressed.strip():
+        # Who the sender addressed. They know it already, so it is theirs
+        # to show; it tells Indi who else is in the conversation.
+        user_blocks.append({"type": "text",
+                            "text": "[How the new message was addressed:]\n" + addressed})
     if shared:
         user_blocks.append({
             "type": "text",

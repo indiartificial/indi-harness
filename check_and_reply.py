@@ -323,6 +323,22 @@ def mark_as_read(gmail, msg_id: str) -> None:
     ).execute()
 
 
+def _addressed(raw: dict, selves) -> str:
+    """The incoming message's From, To and Cc, for the model — and, when
+    Indi was on neither To nor Cc, what that means for the reply."""
+    hdrs = gmail_reads._headers(raw)
+    lines = [f"From: {hdrs.get('from', '')}", f"To: {hdrs.get('to', '') or '(none)'}"]
+    if hdrs.get("cc"):
+        lines.append(f"Cc: {hdrs['cc']}")
+    visible = audience.addrs(hdrs.get("to", "")) | audience.addrs(hdrs.get("cc", ""))
+    if selves and not visible & {s.lower() for s in selves}:
+        lines.append("You were not on To or Cc: this reached you by Bcc, a list "
+                     "or a forward. The people named above don't know you have "
+                     "it; your reply goes to the sender alone, and must not "
+                     "reveal it to anyone else.")
+    return "\n".join(lines)
+
+
 def _meta_of(raw: dict) -> dict:
     """The From/To/Cc of a full Gmail message, as audience.py reads them."""
     hdrs = gmail_reads._headers(raw)
@@ -715,6 +731,7 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
             memory_body="" if others else memory.body,
             pending_text="" if others else pending,
             recipients=recipients,
+            addressed=_addressed(raw_message, selves),
             store=store,
             trusted=trusted,
             scope_all_history=scope_all_history,

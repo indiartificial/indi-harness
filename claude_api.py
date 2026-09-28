@@ -64,6 +64,7 @@ import logging
 import os
 import re
 
+import agenda
 import attachments
 import costs
 import gmail_store
@@ -460,7 +461,8 @@ def build_attachment_blocks(gmail, cfg, msg: dict, client, trusted: bool):
 def build_tools(cfg, trusted: bool, have_store: bool,
                 local_runner=None, scope_all_history: bool = False,
                 self_code_runner=None, claude_code_runner=None,
-                reminder_sender: str = "", shared_reply: bool = False) -> tuple[list[dict], list[str]]:
+                reminder_sender: str = "", shared_reply: bool = False,
+                agenda_owner: str = "") -> tuple[list[dict], list[str]]:
     """Returns (tools, betas). Trust gates the dangerous ones."""
     tools: list[dict] = []
     want_fetch = False
@@ -522,6 +524,15 @@ def build_tools(cfg, trusted: bool, have_store: bool,
         tools.append(outbound.reply_reminder_schema(reminder_sender))
         tools.append(outbound.reply_list_reminders_schema(reminder_sender))
         tools.append(outbound.reply_cancel_reminder_schema(reminder_sender))
+
+    # The agenda (agenda.py). `agenda_owner` is set by check_and_reply.py
+    # only for a sender who already holds the self-modification or
+    # local-tools permission; this adds no gate of its own and loosens
+    # none. The tools are scoped in agenda.py to that owner's own items,
+    # and are held back on a shared reply, because an agenda is its
+    # owner's and not the thread's.
+    if have_store and agenda_owner and not shared_reply:
+        tools.extend(agenda.schemas(agenda_owner))
 
     # The spend ledger. Read-only, and restricted to trusted senders: what
     # the account costs is Steve's business, not a stranger's, and the
@@ -859,7 +870,8 @@ def generate_reply(client, cfg, system_prompt: str, msg: dict,
                    scope_all_history: bool = False,
                    self_code_runner=None, claude_code_runner=None,
                    thread_text: str = "", quoted_text: str = "",
-                   recipients=None, addressed: str = "") -> tuple[str, dict]:
+                   recipients=None, addressed: str = "",
+                   agenda_owner: str = "") -> tuple[str, dict]:
     """Returns (reply_text, stats). stats["set_aside"] is set to the stated
     reason if Indi chose not to reply at all."""
     sender_only = frozenset({(msg.get("from_addr") or "").lower()} - {""})
@@ -869,7 +881,8 @@ def generate_reply(client, cfg, system_prompt: str, msg: dict,
                                scope_all_history, self_code_runner,
                                claude_code_runner,
                                reminder_sender=msg["from_addr"],
-                               shared_reply=shared)
+                               shared_reply=shared,
+                               agenda_owner=agenda_owner)
 
     system_blocks = [{
         "type": "text",
@@ -1079,6 +1092,15 @@ def generate_reply(client, cfg, system_prompt: str, msg: dict,
                 text, is_error = outbound.handle_reply_cancel_reminder(
                     cfg, store, msg["from_addr"], call.input
                 )
+            elif call.name in agenda.TOOL_NAMES:
+                # Checked again here rather than trusted from the tool list:
+                # a tool the model names without having been offered it is
+                # refused. The owner is the gated sender, never an argument.
+                if not agenda_owner or shared or store is None:
+                    text, is_error = "The agenda is not available.", True
+                else:
+                    text, is_error = agenda.handle(cfg, store, agenda_owner,
+                                                   call.name, call.input)
             elif self_code_runner is not None and call.name in self_code_runner.tool_names:
                 stats["self_code"] += 1
                 text, is_error = self_code_runner.handle(call.name, call.input)

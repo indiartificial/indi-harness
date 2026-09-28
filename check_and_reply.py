@@ -672,6 +672,15 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
             "authentication (%s) — no Claude Code session.", sender, why,
         )
 
+    # The agenda (agenda.py) goes to exactly the senders who already hold
+    # one of the two source-and-machine permissions above, and only when
+    # the trust check for this message held — `trusted` has already been
+    # dropped if authentication failed. Nothing new is granted by
+    # address; this reuses those gates and changes neither.
+    agenda_owner = ""
+    if trusted and (cfg.may_modify_own_source(sender) or cfg.may_use_local_tools(sender)):
+        agenda_owner = sender
+
     # --- context --------------------------------------------------------
     memory = memory_file.SenderMemory(drive, sender)
 
@@ -761,6 +770,7 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
             local_runner=local_runner,
             self_code_runner=self_code_runner,
             claude_code_runner=claude_code_runner,
+            agenda_owner=agenda_owner,
             thread_text=thread_text,
             quoted_text=quoted_text,
         )

@@ -70,6 +70,7 @@ PROTECTED_FILES = {
     "correspondents.py", # who accepted it, and when
     "audience.py",       # who may see which message (Phase 2)
     "reply_all.py",      # who a reply goes to, and papering first
+    "consult.py",        # the pre-send check and consultation
 }
 
 # data/ holds the Terms of Service themselves and the record of who has

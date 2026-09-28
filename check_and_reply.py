@@ -81,6 +81,7 @@ import gmail_io
 import gmail_reads
 import drive_tables
 import audience
+import consult
 import gmail_store
 import reply_all
 import local_tools
@@ -452,6 +453,27 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
             mark_as_read(gmail, msg["gmail_msg_id"])
         return "already handled"
 
+    # --- an answer to a consultation (consult.py) -----------------------
+    # Mail in a thread Indi started to ask someone's permission is their
+    # answer, handled by code and never replied to as ordinary mail.
+    consult_on = consult.enabled(cfg) and getattr(store, "supports_audience", False)
+    if consult_on:
+        pending_consult = consult.match(store, msg)
+        if pending_consult is not None:
+            ordinary, why_not = gmail_io.classify_message(msg, selves)
+            outcome = (consult.handle_answer(claude, cfg, gmail, store, people, msg,
+                                             pending_consult, selves)
+                       if ordinary else f"automated message in a consultation ({why_not})")
+            log.info("Consultation: %s", outcome)
+            if cfg.dry_run:
+                return outcome
+            if existing:
+                store.set_status(existing, sheets_queue.STATUS_SKIPPED, outcome)
+            else:
+                store.append_queue_row(msg, sheets_queue.STATUS_SKIPPED, outcome)
+            mark_as_read(gmail, msg["gmail_msg_id"])
+            return outcome
+
     # --- guards ---------------------------------------------------------
     should_reply, reason = gmail_io.classify_message(msg, selves)
     if should_reply and not cfg.is_allowed(sender):
@@ -804,6 +826,30 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
         log.info("Reply carries %d generated attachment(s): %s",
                  len(out_attachments), ", ".join(n for n, _ in out_attachments))
 
+    # --- the pre-send check (consult.py) --------------------------------
+    # Only when there is something the recipients may not see: the
+    # composer was never shown it, so this is the backstop. One rewrite,
+    # then the message is left unanswered rather than sent with a leak.
+    private = consult.candidates(store, recipients) if consult_on else []
+    if private:
+        checked, note = consult.vet(claude, cfg, clean_body, recipients, private)
+        for name, content in out_attachments:
+            if checked is None:
+                break
+            verdict, why_att = consult.check(claude, cfg, content, recipients, private)
+            if verdict != consult.PASS:
+                checked, note = None, f"attachment {name}: {why_att}"
+        if checked is None:
+            outcome = f"blocked by the pre-send check ({note[:200]})"
+            log.warning("Not sending to %s: %s", ", ".join(sorted(recipients)), note)
+            if cfg.dry_run:
+                return outcome
+            if row:
+                store.set_status(row, sheets_queue.STATUS_SKIPPED, outcome)
+            mark_as_read(gmail, msg["gmail_msg_id"])
+            return outcome
+        clean_body = checked
+
     # Re-papering: the sender accepted an older version, so the reply is
     # still theirs but the current terms travel with it. Added before the
     # signature goes on, so the note reads as part of the message rather
@@ -931,6 +977,16 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
     except Exception:
         log.warning("Could not consolidate memory for %s.", sender,
                     exc_info=True)
+
+    # The broker's turn: now that the reply has gone, is anything the
+    # recipients couldn't see worth asking its owner about? (consult.py)
+    if consult_on and private:
+        try:
+            for asked in consult.after_reply(claude, cfg, gmail, store, people,
+                                             msg, recipients):
+                log.info("Consultation: %s", asked)
+        except Exception:
+            log.warning("The broker step failed.", exc_info=True)
     return outcome
 
 
@@ -1075,6 +1131,16 @@ def main() -> int:
                     log.info("Reminder: %s", outcome)
             except Exception:
                 log.error("Reminder delivery failed", exc_info=True)
+
+        # Consultations nobody answered in time count as no.
+        if not cfg.dry_run and consult.enabled(cfg) \
+                and getattr(store, "supports_audience", False):
+            try:
+                expired = consult.expire(store)
+                if expired:
+                    log.info("%d consultation(s) expired unanswered.", expired)
+            except Exception:
+                log.warning("Could not expire consultations.", exc_info=True)
 
         # Replies that were waiting for someone to accept the terms, now
         # ready: everyone answered, or 72 hours passed (reply_all.py).

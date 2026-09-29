@@ -17,6 +17,13 @@ From Windows (PowerShell):
 and while that runs, open http://localhost:8765 in a browser. Ctrl+C in
 PowerShell closes the tunnel.
 
+From an iPhone, put Tailscale on the server and the phone, run
+`tailscale serve --bg 8765` on the server, and list the server's
+Tailscale name in INDI_LOGVIEW_HOSTS (see that function). The viewer
+still listens on loopback only; Tailscale carries the phone's request to
+it over the private tailnet, never the public internet. Never use
+`tailscale funnel` for this: that would make it public.
+
 Other safeguards: it refuses to start on any address but loopback; it
 answers only requests addressed to localhost (so a web page elsewhere
 can't reach it through DNS tricks); it only ever reads the one log file;
@@ -44,6 +51,15 @@ MAX_LINES = 5000
 READ_LIMIT = 8 * 1024 * 1024        # never read more than the last 8 MB
 _ENTRY_START = re.compile(r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d")
 _ALLOWED_HOSTS = {"localhost", "127.0.0.1", "[::1]"}
+
+
+def allowed_hosts() -> set[str]:
+    """localhost, plus any names in INDI_LOGVIEW_HOSTS (comma-separated) —
+    for a private proxy in front of the viewer, such as `tailscale serve`,
+    which passes on the name the phone asked for. Exact names only."""
+    extra = {h.strip().lower() for h in os.environ.get("INDI_LOGVIEW_HOSTS", "").split(",")
+             if h.strip()}
+    return _ALLOWED_HOSTS | extra
 
 
 # ---------------------------------------------------------------------------
@@ -193,7 +209,9 @@ SECURITY_HEADERS = {
 }
 
 
-def make_handler(log_path: Path):
+def make_handler(log_path: Path, hosts: set[str] | None = None):
+    hosts = set(hosts or allowed_hosts())
+
     class Handler(BaseHTTPRequestHandler):
         server_version = "indi-log-viewer"
         sys_version = ""
@@ -212,7 +230,7 @@ def make_handler(log_path: Path):
 
         def do_GET(self):
             host = (self.headers.get("Host") or "").rsplit(":", 1)[0].lower()
-            if host not in _ALLOWED_HOSTS:
+            if host not in hosts:
                 # A page on some other site pointing a name at 127.0.0.1
                 # arrives with that name here; refuse it.
                 return self._send(403, b"forbidden", "text/plain; charset=utf-8")

@@ -92,3 +92,17 @@ def test_a_huge_log_is_read_from_the_end(tmp_path):
     log = tmp_path / "log.txt"
     log.write_text("x" * 100 + "\n" + "2026-09-29 19:00:00,000 INFO    indi: last line\n")
     assert log_viewer.tail_lines(log, limit_bytes=60)[-1].endswith("last line")
+
+
+def test_a_named_private_proxy_host_is_accepted(tmp_path, monkeypatch):
+    monkeypatch.setenv("INDI_LOGVIEW_HOSTS", "indi-server.tail1234.ts.net")
+    log = tmp_path / "log.txt"
+    log.write_text(LOG)
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), log_viewer.make_handler(log))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        port = srv.server_address[1]
+        assert _get(port, "/lines", host="indi-server.tail1234.ts.net")[0] == 200
+        assert _get(port, "/lines", host="other.tail1234.ts.net")[0] == 403
+    finally:
+        srv.shutdown()

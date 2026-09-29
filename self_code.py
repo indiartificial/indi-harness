@@ -79,7 +79,23 @@ PROTECTED_FILES = {
 PROTECTED_DIRS = {"tests", "deploy", "data"}
 
 # Files that are never readable through these tools at all.
-SECRET_FILES = {".env", "api_key.txt", "token.json", "credentials.json"}
+SECRET_FILES = {"api_key.txt", "token.json", "credentials.json"}
+
+# Settings: readable and changeable only in a narrow case — the sender may
+# modify the harness, passed authentication, and the reply goes to them
+# alone (see `SelfCodeRunner.can_read_settings`). The read tool is
+# otherwise open to anyone who writes in, and .env names who may do what:
+# the addresses allowed Claude Code sessions are exactly the ones a forger
+# would want. Values under secret-looking names are redacted on the way
+# out, in case something sensitive is ever put there again.
+#
+# A change to .env doesn't go through git (the file is untracked) or the
+# test suite (which doesn't read it). Instead: the previous file is kept
+# as .env.bak-<time>, the new one must load as a configuration in a fresh
+# process, and if it doesn't the old one is put back.
+SETTINGS_FILES = {".env"}
+SETTINGS_BACKUPS_KEPT = 10
+_SECRET_NAME = re.compile(r"KEY|TOKEN|SECRET|PASSW|CREDENTIAL|PRIVATE", re.IGNORECASE)
 
 PROTECTED_BEGIN = "# INDI-PROTECTED-BEGIN"
 PROTECTED_END = "# INDI-PROTECTED-END"
@@ -102,8 +118,10 @@ def _git(cfg, *args: str, timeout: int = 60) -> subprocess.CompletedProcess:
     return _run(["git", *args], cfg.base_dir, timeout)
 
 
-def _relative(cfg, candidate: str) -> Path:
-    """Resolve a path inside the harness directory, or refuse."""
+def _relative(cfg, candidate: str, allow_settings: bool = False) -> Path:
+    """Resolve a path inside the harness directory, or refuse. Settings
+    files resolve only when `allow_settings` — which only reading ever
+    passes; a change to them is always refused."""
     if not candidate or not candidate.strip():
         raise SelfCodeError("No path given.")
     root = cfg.base_dir.resolve()
@@ -118,7 +136,30 @@ def _relative(cfg, candidate: str) -> Path:
     rel = target.relative_to(root)
     if rel.name in SECRET_FILES or rel.parts[0] in SECRET_FILES:
         raise SelfCodeError(f"{rel} holds credentials and is not readable.")
+    if _is_settings(rel) and not allow_settings:
+        raise SelfCodeError(f"{rel} holds the harness settings; it can't be changed "
+                            "this way, and is readable only in a private reply to "
+                            "someone allowed to modify the harness.")
     return target
+
+
+def _is_settings(rel: Path) -> bool:
+    """.env, and its backups (.env.bak-…); not the .env.example template."""
+    name = rel.parts[0] if rel.parts else rel.name
+    return (name in SETTINGS_FILES or rel.name in SETTINGS_FILES
+            or (name.startswith(".env.") and name != ".env.example"))
+
+
+def redact_settings(text: str) -> str:
+    """KEY=value lines keep their value unless the name looks secret."""
+    out = []
+    for line in text.splitlines():
+        name, sep, value = line.partition("=")
+        if sep and not line.lstrip().startswith("#") and value.strip() \
+                and _SECRET_NAME.search(name):
+            line = f"{name}=[redacted]"
+        out.append(line)
+    return "\n".join(out) + ("\n" if text.endswith("\n") else "")
 
 
 def is_protected(cfg, path: Path) -> str:
@@ -157,7 +198,7 @@ def _region_digest(text: str) -> str:
 # TOOL SCHEMAS
 # ---------------------------------------------------------------------------
 
-def schemas(cfg, can_modify: bool) -> list[dict]:
+def schemas(cfg, can_modify: bool, can_read_settings: bool = False) -> list[dict]:
     tools = [
         {
             "name": LIST_TOOL,
@@ -173,6 +214,10 @@ def schemas(cfg, can_modify: bool) -> list[dict]:
                 "Read one file of your own source code. Use this to explain how "
                 "you work, to diagnose something that went wrong, or before "
                 "proposing a change. Credential files are not readable."
+                + (" The settings file .env is readable here (secret-looking "
+                   "values redacted) because this reply goes only to someone "
+                   "allowed to change the harness."
+                   if can_read_settings else "")
             ),
             "input_schema": {
                 "type": "object",
@@ -193,6 +238,13 @@ def schemas(cfg, can_modify: bool) -> list[dict]:
                 "contents of the file, not a diff. Some files and regions are "
                 "protected and will be refused — that refusal is deliberate, so "
                 "don't work around it; mention it to Steve instead."
+                + (" You may also change .env the same way (complete file; a "
+                   "value shown as [redacted] can be left as [redacted] to keep "
+                   "it). It isn't tested or versioned: the old file is kept as "
+                   "a backup, and the new one must load as a configuration or "
+                   "the old one is restored. Settings take effect on the next "
+                   "run. Say what you changed and why."
+                   if can_read_settings else "")
             ),
             "input_schema": {
                 "type": "object",
@@ -213,9 +265,14 @@ def schemas(cfg, can_modify: bool) -> list[dict]:
 # OPERATIONS
 # ---------------------------------------------------------------------------
 
-def _list(cfg) -> str:
+def _list(cfg, show_settings: bool = False) -> str:
     root = cfg.base_dir.resolve()
     lines = []
+    if show_settings:
+        for name in sorted(SETTINGS_FILES):
+            path = root / name
+            if path.is_file():
+                lines.append(f"{name}  ({path.stat().st_size} bytes)  [settings, read-only]")
     for path in sorted(root.rglob("*")):
         if path.is_dir() or ".git" in path.parts or "__pycache__" in path.parts:
             continue
@@ -231,13 +288,16 @@ def _list(cfg) -> str:
     return "\n".join(lines) or "(no files)"
 
 
-def _read(cfg, tool_input: dict) -> str:
-    target = _relative(cfg, tool_input.get("path", ""))
+def _read(cfg, tool_input: dict, allow_settings: bool = False) -> str:
+    target = _relative(cfg, tool_input.get("path", ""), allow_settings=allow_settings)
     if not target.is_file():
         raise SelfCodeError("No such file.")
     if target.stat().st_size > 400_000:
         raise SelfCodeError("File is too large to read in one go.")
     text = target.read_text(encoding="utf-8", errors="replace")
+    if _is_settings(target.relative_to(cfg.base_dir.resolve())):
+        return f"[{target.name} — settings, secret-looking values redacted]\n" \
+            + redact_settings(text)
     flag = is_protected(cfg, target)
     header = f"[{target.name}{' — ' + flag if flag else ''}]\n"
     return header + text
@@ -267,7 +327,82 @@ def run_tests(cfg) -> tuple[bool, str]:
     return proc.returncode == 0, output[-4000:]
 
 
-def _propose(cfg, tool_input: dict) -> str:
+_LINE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
+
+
+def validate_settings(cfg) -> tuple[bool, str]:
+    """Does the harness's configuration load from the current .env, in a
+    fresh process that inherits nothing from this one?"""
+    import sys
+    env = {"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": str(cfg.base_dir),
+           "LANG": "C.UTF-8"}
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c",
+             "import config; config.Config.from_env(non_interactive=True); print('ok')"],
+            cwd=str(cfg.base_dir), env=env, capture_output=True, text=True, timeout=60)
+    except Exception as exc:
+        return False, str(exc)
+    out = (proc.stdout or "") + (proc.stderr or "")
+    return proc.returncode == 0 and "ok" in (proc.stdout or ""), out[-2000:]
+
+
+def _change_settings(cfg, content: str, rationale: str) -> str:
+    """Replace .env: keep a backup, check the new one loads, else restore."""
+    root = cfg.base_dir.resolve()
+    target = root / ".env"
+    old_text = target.read_text(encoding="utf-8") if target.exists() else ""
+    old_values = {}
+    for line in old_text.splitlines():
+        name, sep, value = line.partition("=")
+        if sep and not line.lstrip().startswith("#"):
+            old_values[name.strip()] = value
+
+    # What Indi was shown had secret-looking values replaced; a line sent
+    # back unchanged must not overwrite the real value with the marker.
+    lines = []
+    for n, line in enumerate(content.splitlines(), 1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            lines.append(line)
+            continue
+        if not _LINE.match(stripped):
+            raise SelfCodeError(f"Line {n} is not NAME=value: {stripped[:80]!r}")
+        name, _, value = stripped.partition("=")
+        if value.strip() == "[redacted]":
+            if name not in old_values:
+                raise SelfCodeError(f"{name} is marked [redacted] but has no value to keep.")
+            value = old_values[name]
+        if name == "ANTHROPIC_API_KEY" and value.strip():
+            raise SelfCodeError("The API key does not go in .env (see config.py).")
+        lines.append(f"{name}={value}")
+    new_text = "\n".join(lines) + "\n"
+    if new_text == old_text:
+        return "No change: the new .env is the same as the old one."
+
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H%M%S")
+    backup = root / f".env.bak-{stamp}"
+    backup.write_text(old_text, encoding="utf-8")
+    tmp = root / ".env.tmp"
+    tmp.write_text(new_text, encoding="utf-8")
+    tmp.replace(target)
+    ok, output = validate_settings(cfg)
+    if not ok:
+        backup.replace(target)
+        raise SelfCodeError("The new .env did not load as a configuration, so the old "
+                            "one was put back. Output:\n" + output)
+    for old in sorted(root.glob(".env.bak-*"))[:-SETTINGS_BACKUPS_KEPT]:
+        old.unlink(missing_ok=True)
+
+    diff = "".join(difflib.unified_diff(
+        redact_settings(old_text).splitlines(True), redact_settings(new_text).splitlines(True),
+        ".env (before)", ".env (after)"))
+    log.warning("SELF-CODE changed .env: %s\n%s", rationale, diff)
+    return ("Changed .env; it takes effect from the next run. The previous file is "
+            f"kept as {backup.name}.\n\n{diff}")
+
+
+def _propose(cfg, tool_input: dict, allow_settings: bool = False) -> str:
     path_str = tool_input.get("path", "")
     content = tool_input.get("content", "")
     rationale = (tool_input.get("rationale") or "").strip()
@@ -277,7 +412,12 @@ def _propose(cfg, tool_input: dict) -> str:
     if not rationale:
         raise SelfCodeError("A rationale is required for a code change.")
 
-    target = _relative(cfg, path_str)
+    target = _relative(cfg, path_str, allow_settings=allow_settings)
+    rel = target.relative_to(cfg.base_dir.resolve())
+    if _is_settings(rel):
+        if rel.name not in SETTINGS_FILES:
+            raise SelfCodeError("Backups of .env are not changed directly.")
+        return _change_settings(cfg, content, rationale)
     flag = is_protected(cfg, target)
     if flag:
         raise SelfCodeError(
@@ -394,9 +534,11 @@ def _propose(cfg, tool_input: dict) -> str:
 # ---------------------------------------------------------------------------
 
 class SelfCodeRunner:
-    def __init__(self, cfg, can_modify: bool):
+    def __init__(self, cfg, can_modify: bool, can_read_settings: bool = False):
         self.cfg = cfg
         self.can_modify = can_modify
+        # Reading and changing .env go together, and need can_modify too.
+        self.can_read_settings = can_read_settings and can_modify
         self.changes = 0
 
     @property
@@ -407,21 +549,22 @@ class SelfCodeRunner:
         return names
 
     def schemas(self) -> list[dict]:
-        return schemas(self.cfg, self.can_modify)
+        return schemas(self.cfg, self.can_modify, self.can_read_settings)
 
     def handle(self, name: str, tool_input: dict) -> tuple[str, bool]:
         if name not in self.tool_names:
             return f"{name} is not available.", True
         try:
             if name == LIST_TOOL:
-                return _list(self.cfg), False
+                return _list(self.cfg, self.can_read_settings), False
             if name == READ_TOOL:
-                return _read(self.cfg, tool_input), False
+                return _read(self.cfg, tool_input, self.can_read_settings), False
             if name == PROPOSE_TOOL:
                 if self.changes >= self.cfg.max_self_code_changes_per_run:
                     return ("Reached the self-modification limit for this run. "
                             "Any further changes wait for the next one.", True)
-                result = _propose(self.cfg, tool_input)
+                result = _propose(self.cfg, tool_input,
+                                  allow_settings=self.can_read_settings)
                 # Only a change that actually got as far as the repo counts
                 # against the budget. A refusal is cheap, and spending the
                 # budget on rejections would mean a few protected-file

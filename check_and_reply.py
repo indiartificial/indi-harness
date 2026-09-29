@@ -648,7 +648,12 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
     self_code_runner = None
     if cfg.enable_self_code:
         self_code_runner = self_code.SelfCodeRunner(
-            cfg, can_modify=cfg.may_modify_own_source(sender)
+            cfg, can_modify=cfg.may_modify_own_source(sender),
+            # .env names who may do what; readable and changeable only by an
+            # authenticated sender who may change the harness, in a reply to
+            # them alone (self_code.py).
+            can_read_settings=(cfg.may_modify_own_source(sender) and authentic
+                               and not others),
         )
         if self_code_runner.can_modify:
             log.warning("SELF-MODIFICATION enabled for %s (auto-apply=%s)",

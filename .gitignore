@@ -1,4 +1,7 @@
 .env
+# Backups Indi keeps when it changes .env, and the temporary file.
+.env.*
+!.env.example
 token.json
 credentials.json
 indi.lock

@@ -81,7 +81,7 @@ import gmail_io
 import gmail_reads
 import sheets_queue
 from sheets_queue import (
-    LABEL_OUTBOUND, LABEL_REPLY, STATUS_LABELS, SheetStore,
+    LABEL_NOTICE, LABEL_OUTBOUND, LABEL_REPLY, STATUS_LABELS, SheetStore,
 )
 
 log = logging.getLogger("indi.gmail_store")
@@ -599,6 +599,20 @@ class GmailStore(SheetStore):
         ids = self._ids(LABEL_REPLY, q)
         return sum(1 for m in self._meta(ids).values()
                    if addr in gmail_reads._addrs(m["to"]) and m["date"] >= cutoff_ms)
+
+    def notices_in_last_day(self, addr: str) -> int:
+        """"Unable to respond" notices sent to this address in the last 24h."""
+        addr = gmail_reads.normalise_addr(addr)
+        if not addr:
+            return 0
+        cutoff_ms = int((_utc_now() - datetime.timedelta(days=1)).timestamp() * 1000)
+        q = "newer_than:2d" + (f" to:{addr}" if gmail_reads._query_addr(addr) else "")
+        ids = self._ids(LABEL_NOTICE, q)
+        return sum(1 for m in self._meta(ids).values()
+                   if addr in gmail_reads._addrs(m["to"]) and m["date"] >= cutoff_ms)
+
+    def record_notice(self, message_id: str) -> None:
+        self._label_add(message_id, LABEL_NOTICE)
 
     # -- handled mail in general -----------------------------------------
 

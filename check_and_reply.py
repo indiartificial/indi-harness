@@ -324,6 +324,46 @@ def mark_as_read(gmail, msg_id: str) -> None:
     ).execute()
 
 
+NOTICE_UNABLE = ("Thank you for your message. I'm unable to respond to it.")
+NOTICE_DAILY_CAP = ("Thank you for your message. I've reached the number of replies "
+                    "I can send you in a day, so I'm unable to respond to this one. "
+                    "Messages you send once that limit resets will be answered as usual.")
+
+
+def send_withheld_notice(cfg, gmail, store, msg: dict, text: str) -> str:
+    """Tell the sender, in their thread and to them alone, that Indi is
+    unable to respond. At most one a day per person, so a busy sender gets
+    one note rather than one per message; and only with a store that can
+    count them, since an uncounted note is how a loop would begin.
+    Never raises: the message is already dealt with when this runs."""
+    to = (msg.get("reply_to_addr") or msg.get("from_addr") or "").lower()
+    counter = getattr(store, "notices_in_last_day", None)
+    if not to or counter is None:
+        return "no notice (can't count notices with this store)"
+    try:
+        if counter(to) >= 1:
+            return "notice already sent today"
+        mime = gmail_io.build_reply_mime(
+            to_addr=msg.get("reply_to_raw") or to, subject=msg.get("subject", ""),
+            body=ensure_signature(text), in_reply_to=msg.get("message_id", ""),
+            references=msg.get("references", ""))
+        mime["threadId"] = msg.get("thread_id", "")
+        if cfg.send_automatically:
+            result = gmail.users().messages().send(userId="me", body=mime).execute() or {}
+            sent_id, how = result.get("id", ""), "sent"
+        else:
+            result = gmail.users().drafts().create(
+                userId="me", body={"message": mime}).execute() or {}
+            sent_id, how = (result.get("message") or {}).get("id", ""), "drafted"
+        store.record_notice(sent_id)
+        log.info("Unable-to-respond notice %s to %s.", how, to)
+        return f"notice {how}"
+    except Exception:
+        log.warning("Could not send the unable-to-respond notice to %s.", to,
+                    exc_info=True)
+        return "notice failed"
+
+
 def _addressed(raw: dict, selves) -> str:
     """The incoming message's From, To and Cc, for the model — and, when
     Indi was on neither To nor Cc, what that means for the reply."""
@@ -476,22 +516,30 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
 
     # --- guards ---------------------------------------------------------
     should_reply, reason = gmail_io.classify_message(msg, selves)
+    # A person, not a machine, whose reply is being withheld by a setting
+    # gets a short note saying so. An autoresponder, a list or a no-reply
+    # address never does: that is how mail loops start.
+    withheld = None
     if should_reply and not cfg.is_allowed(sender):
         should_reply, reason = False, "sender not in INDI_ALLOWED_SENDERS"
+        withheld = NOTICE_UNABLE
     if should_reply and cfg.max_replies_per_sender_per_day:
         recent = store.replies_in_last_day(sender)
         if recent >= cfg.max_replies_per_sender_per_day:
             should_reply = False
             reason = f"per-sender daily cap reached ({recent})"
+            withheld = NOTICE_DAILY_CAP
 
     if not should_reply:
         log.info("Not replying: %s", reason)
         if cfg.dry_run:
-            return f"would skip ({reason})"
+            return f"would skip ({reason})" + (" and send a notice" if withheld else "")
         row = existing or store.append_queue_row(msg, sheets_queue.STATUS_SKIPPED, reason)
         if existing:
             store.set_status(row, sheets_queue.STATUS_SKIPPED, reason)
         mark_as_read(gmail, msg["gmail_msg_id"])
+        if withheld:
+            reason += "; " + send_withheld_notice(cfg, gmail, store, msg, withheld)
         return f"skipped ({reason})"
 
     # --- terms of service -----------------------------------------------
@@ -862,7 +910,10 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
             if row:
                 store.set_status(row, sheets_queue.STATUS_SKIPPED, outcome)
             mark_as_read(gmail, msg["gmail_msg_id"])
-            return outcome
+            # The same words as any other withheld reply: nothing in the
+            # note may hint that something private is behind it.
+            return outcome + "; " + send_withheld_notice(cfg, gmail, store, msg,
+                                                         NOTICE_UNABLE)
         clean_body = checked
 
     # Re-papering: the sender accepted an older version, so the reply is

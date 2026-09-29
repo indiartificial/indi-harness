@@ -104,6 +104,9 @@ STATUS_LABELS = {
 # limit and the outbound budgets have history to count.
 LABEL_REPLY = "Indi/Reply"
 LABEL_OUTBOUND = "Indi/Outbound"
+# The short "I'm unable to respond" notes sent when a reply is withheld
+# (check_and_reply.send_withheld_notice); counted to send at most one a day.
+LABEL_NOTICE = "Indi/Notice"
 
 # Indi's own outbound-initiated messages and its journal entries. Both are
 # separate tabs in the Responses spreadsheet so the reply pipeline and the

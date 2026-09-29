@@ -936,11 +936,21 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
     private = consult.candidates(store, recipients) if consult_on else []
     if private:
         try:
-            checked, note = consult.vet(claude, cfg, clean_body, recipients, private)
+            # What the recipients have already seen, so the check can tell
+            # a leak from someone being told back what they themselves said.
+            seen = "\n\n".join(p for p in (
+                f"THEIR MESSAGE ({msg.get('from_addr', '')}):\n{msg.get('body', '')}",
+                quoted_text and f"QUOTED IN IT:\n{quoted_text}",
+                thread_text and f"THE THREAD:\n{thread_text}",
+                (not others and memory.body) and f"WHAT THEY TOLD INDI BEFORE:\n{memory.body}",
+                (not others and pending) and f"RECENT EXCHANGES WITH THEM:\n{pending}",
+            ) if p)
+            checked, note = consult.vet(claude, cfg, clean_body, recipients, private, seen)
             for name, content in out_attachments:
                 if checked is None:
                     break
-                verdict, why_att = consult.check(claude, cfg, content, recipients, private)
+                verdict, why_att = consult.check(claude, cfg, content, recipients,
+                                                 private, seen)
                 if verdict != consult.PASS:
                     checked, note = None, f"attachment {name}: {why_att}"
         except consult.CheckUnavailable as exc:

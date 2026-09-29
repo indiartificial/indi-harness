@@ -337,3 +337,30 @@ def test_a_check_that_cannot_run_is_retried_then_given_up(tmp_path, people, repl
         assert gmail.sent == [] and gmail.read == []          # left unread to retry
     out = _go(gmail, cfg, store, people)
     assert "after 3 attempts" in out and gmail.read == ["m1"]
+
+
+def test_the_check_is_shown_what_the_recipients_already_saw(setup):
+    _, store, _ = setup
+    client = Client([_tool("verdict", verdict="pass", reason="")])
+    consult.check(client, CFG, "You told me Wednesday is out.", {ANN},
+                  consult.candidates(store, {ANN}), seen="Ann: Wednesday is out for me.")
+    content = client.seen[0]["messages"][0]["content"]
+    assert "ALREADY SEEN" in content and "Wednesday is out for me" in content
+    assert "never a leak" in client.seen[0]["system"]
+
+
+def test_process_message_gives_the_check_the_senders_own_words(tmp_path, people, reply,
+                                                               monkeypatch):
+    monkeypatch.setattr(consult, "enabled", lambda cfg=None: True)
+    monkeypatch.setattr(consult, "match", lambda store, msg: None)
+    monkeypatch.setattr(consult, "candidates", lambda store, r, limit=10: [{"x": 1}])
+    seen = []
+    monkeypatch.setattr(consult, "vet",
+                        lambda client, cfg, draft, r, items, s="": seen.append(s) or (draft, "ok"))
+    monkeypatch.setattr(consult, "check",
+                        lambda client, cfg, text, r, items, s="": seen.append(s) or (consult.PASS, ""))
+    monkeypatch.setattr(consult, "after_reply", lambda *a: [])
+    gmail, store = FakeGmail(), ReplyStore()
+    _go(gmail, _cfg(tmp_path), store, people)
+    assert seen and "THEIR MESSAGE" in seen[0] and "lunch?" in seen[0]
+    assert len(gmail.sent) == 1

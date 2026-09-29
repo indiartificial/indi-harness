@@ -134,13 +134,31 @@ def _render(items: list[dict]) -> str:
         f"{(r.get('body') or '')[:MAX_ITEM_CHARS]}\n</item>" for r in items)
 
 
+class CheckUnavailable(Exception):
+    """The pre-send check could not be run — an API error, not a verdict.
+    Callers must not send, and should try again later rather than treat
+    the draft as blocked for good."""
+
+
 def _tool_call(client, cfg, system: str, content: str, tool: dict, kind: str):
+    """One call that must answer through `tool`. Forcing the tool is the
+    sure way, but some models refuse a forced tool choice
+    (\"tool_choice: type 'tool' ... not supported for this model\"); for those
+    the call is made again with the choice left to the model and the
+    instruction in the system prompt instead."""
     model = model_for(cfg)
-    response = client.messages.create(
-        model=model, max_tokens=1500, system=system,
-        tools=[tool], tool_choice={"type": "tool", "name": tool["name"]},
-        messages=[{"role": "user", "content": content}],
-    )
+    kwargs = dict(model=model, max_tokens=1500, tools=[tool],
+                  messages=[{"role": "user", "content": content}])
+    try:
+        response = client.messages.create(
+            system=system, tool_choice={"type": "tool", "name": tool["name"]}, **kwargs)
+    except Exception as exc:
+        if "tool_choice" not in str(exc):
+            raise
+        log.info("Model %s refuses a forced tool choice; asking instead.", model)
+        response = client.messages.create(
+            system=system + f"\n\nAnswer only by calling the {tool['name']} tool.",
+            tool_choice={"type": "auto"}, **kwargs)
     costs.record(kind, model, costs.tokens_from_usage(getattr(response, "usage", None)))
     for block in response.content:
         if getattr(block, "type", "") == "tool_use" and block.name == tool["name"]:
@@ -191,12 +209,13 @@ def check(client, cfg, draft: str, recipients, items: list[dict]) -> tuple[str, 
                f"PRIVATE ITEMS:\n{_render(items)}\n\nDRAFT:\n<draft>\n{draft}\n</draft>")
     try:
         out = _tool_call(client, cfg, CHECK_SYSTEM, content, CHECK_TOOL, "check")
-    except Exception:
-        # Failing closed: a check that cannot run blocks.
-        log.warning("Pre-send check failed to run; blocking.", exc_info=True)
-        return BLOCK, "the pre-send check could not run"
+    except Exception as exc:
+        # Failing closed — nothing is sent — but as a failure to retry, not
+        # a verdict: an API hiccup must not swallow a reply for good.
+        log.warning("Pre-send check failed to run.", exc_info=True)
+        raise CheckUnavailable(str(exc)[:300]) from exc
     if not out or out.get("verdict") not in (PASS, REVISE, BLOCK):
-        return BLOCK, "the pre-send check gave no usable verdict"
+        raise CheckUnavailable("the pre-send check gave no usable verdict")
     return out["verdict"], (out.get("reason") or "")[:500]
 
 
@@ -396,8 +415,11 @@ def request(client, cfg, gmail, store, people, item: dict, question: str,
     ok, why = allowed(store, owner, item["gmail_msg_id"], to)
     if not ok:
         return f"not asking {owner}: {why}"
-    text, note = vet(client, cfg, question, {owner}, [
-        r for r in candidates(store, {owner}) if r["gmail_msg_id"] != item["gmail_msg_id"]])
+    try:
+        text, note = vet(client, cfg, question, {owner}, [
+            r for r in candidates(store, {owner}) if r["gmail_msg_id"] != item["gmail_msg_id"]])
+    except CheckUnavailable as exc:
+        return f"not asking {owner}: the check could not run ({str(exc)[:120]})"
     if text is None:
         return f"not asking {owner}: the question failed the check ({note[:120]})"
     consult_id = f"c-{uuid.uuid4().hex[:8]}"
@@ -541,7 +563,10 @@ def follow_up(client, cfg, gmail, store, row: dict, selves) -> str:
                     if getattr(b, "type", "") == "text").strip()
     if not draft or draft.upper() == "NOTHING":
         return "no follow-up: nothing to add"
-    text, note = vet(client, cfg, draft, set(to), candidates(store, set(to)))
+    try:
+        text, note = vet(client, cfg, draft, set(to), candidates(store, set(to)))
+    except CheckUnavailable as exc:
+        return f"no follow-up: the check could not run ({str(exc)[:120]})"
     if text is None:
         return f"no follow-up: blocked by the check ({note[:120]})"
     sender = msg.get("from_addr", "").lower()

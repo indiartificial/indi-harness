@@ -124,13 +124,44 @@ def test_a_second_failure_blocks(setup):
     assert consult.vet(client, CFG, "d", {ANN}, items)[0] is None
 
 
-def test_a_check_that_cannot_run_blocks(setup):
+def test_a_check_that_cannot_run_is_reported_not_passed(setup):
     _, store, _ = setup
 
     class Broken:
         messages = SimpleNamespace(create=lambda **kw: (_ for _ in ()).throw(RuntimeError()))
-    assert consult.check(Broken(), CFG, "d", {ANN},
-                         consult.candidates(store, {ANN}))[0] == consult.BLOCK
+    with pytest.raises(consult.CheckUnavailable):
+        consult.check(Broken(), CFG, "d", {ANN}, consult.candidates(store, {ANN}))
+
+
+def test_a_model_that_refuses_a_forced_tool_is_asked_instead(setup):
+    _, store, _ = setup
+    calls = []
+
+    def create(**kw):
+        calls.append(kw)
+        if kw["tool_choice"]["type"] == "tool":
+            raise RuntimeError("Error code: 400 - tool_choice: type \"tool\" and \"any\" "
+                               "are not supported for this model.")
+        return SimpleNamespace(content=[_tool("verdict", verdict="pass", reason="")],
+                               usage=None)
+    client = SimpleNamespace(messages=SimpleNamespace(create=create))
+    verdict, _ = consult.check(client, CFG, "d", {ANN}, consult.candidates(store, {ANN}))
+    assert verdict == consult.PASS
+    assert [c["tool_choice"]["type"] for c in calls] == ["tool", "auto"]
+    assert "calling the verdict tool" in calls[1]["system"]
+
+
+def test_an_unrelated_api_error_is_not_retried_that_way(setup):
+    _, store, _ = setup
+    calls = []
+
+    def create(**kw):
+        calls.append(kw)
+        raise RuntimeError("Error code: 400 - usage limits reached")
+    client = SimpleNamespace(messages=SimpleNamespace(create=create))
+    with pytest.raises(consult.CheckUnavailable):
+        consult.check(client, CFG, "d", {ANN}, consult.candidates(store, {ANN}))
+    assert len(calls) == 1
 
 
 # --------------------------------------------------------------------------
@@ -288,3 +319,21 @@ def test_a_consultation_answer_is_not_replied_to(tmp_path, people, reply, monkey
     gmail, store = FakeGmail(), ReplyStore()
     assert _go(gmail, _cfg(tmp_path), store, people) == "consultation c-1: granted"
     assert gmail.sent == [] and gmail.read == ["m1"]
+
+
+def test_a_check_that_cannot_run_is_retried_then_given_up(tmp_path, people, reply, monkeypatch):
+    monkeypatch.setattr(consult, "enabled", lambda cfg=None: True)
+    monkeypatch.setattr(consult, "match", lambda store, msg: None)
+    monkeypatch.setattr(consult, "candidates", lambda store, r, limit=10: [{"x": 1}])
+
+    def unavailable(*a):
+        raise consult.CheckUnavailable("400 - something")
+    monkeypatch.setattr(consult, "vet", unavailable)
+    gmail, store = FakeGmail(), ReplyStore()
+    cfg = _cfg(tmp_path, base_dir=tmp_path)
+    for attempt in (1, 2):
+        out = _go(gmail, cfg, store, people)
+        assert f"attempt {attempt} of 3" in out
+        assert gmail.sent == [] and gmail.read == []          # left unread to retry
+    out = _go(gmail, cfg, store, people)
+    assert "after 3 attempts" in out and gmail.read == ["m1"]

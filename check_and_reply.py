@@ -324,6 +324,46 @@ def mark_as_read(gmail, msg_id: str) -> None:
     ).execute()
 
 
+MAX_CHECK_ATTEMPTS = 3
+ATTEMPTS_FILE = "check_attempts.json"
+
+
+def _check_unavailable(cfg, gmail, store, msg: dict, row, why: str) -> str:
+    """The pre-send check couldn't run. Leave the message for the next run,
+    or, after MAX_CHECK_ATTEMPTS, give up: mark it read, say so in the log
+    at ERROR, and send the sender the plain notice."""
+    import json
+    log.warning("Pre-send check unavailable for %s: %s", msg["gmail_msg_id"], why)
+    if cfg.dry_run:
+        return f"pre-send check unavailable ({why[:120]})"
+    path = cfg.base_dir / "data" / ATTEMPTS_FILE
+    try:
+        attempts = json.loads(path.read_text()) if path.exists() else {}
+    except Exception:
+        attempts = {}
+    count = attempts.get(msg["gmail_msg_id"], 0) + 1
+    attempts[msg["gmail_msg_id"]] = count
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Only the most recent ids matter; keep the file small.
+        path.write_text(json.dumps(dict(list(attempts.items())[-200:])))
+    except Exception:
+        log.warning("Could not record check attempts.", exc_info=True)
+    if count < MAX_CHECK_ATTEMPTS:
+        if row:
+            store.set_status(row, sheets_queue.STATUS_FAILED,
+                             f"pre-send check unavailable (attempt {count})")
+        return (f"pre-send check unavailable, attempt {count} of "
+                f"{MAX_CHECK_ATTEMPTS}; left unread to retry")
+    log.error("Giving up on %s after %d attempts: the pre-send check could not run (%s)",
+              msg["gmail_msg_id"], count, why)
+    outcome = f"not sent: the pre-send check could not run after {count} attempts"
+    if row:
+        store.set_status(row, sheets_queue.STATUS_SKIPPED, outcome)
+    mark_as_read(gmail, msg["gmail_msg_id"])
+    return outcome + "; " + send_withheld_notice(cfg, gmail, store, msg, NOTICE_UNABLE)
+
+
 NOTICE_UNABLE = ("Thank you for your message. I'm unable to respond to it.")
 NOTICE_DAILY_CAP = ("Thank you for your message. I've reached the number of replies "
                     "I can send you in a day, so I'm unable to respond to this one. "
@@ -895,13 +935,19 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
     # then the message is left unanswered rather than sent with a leak.
     private = consult.candidates(store, recipients) if consult_on else []
     if private:
-        checked, note = consult.vet(claude, cfg, clean_body, recipients, private)
-        for name, content in out_attachments:
-            if checked is None:
-                break
-            verdict, why_att = consult.check(claude, cfg, content, recipients, private)
-            if verdict != consult.PASS:
-                checked, note = None, f"attachment {name}: {why_att}"
+        try:
+            checked, note = consult.vet(claude, cfg, clean_body, recipients, private)
+            for name, content in out_attachments:
+                if checked is None:
+                    break
+                verdict, why_att = consult.check(claude, cfg, content, recipients, private)
+                if verdict != consult.PASS:
+                    checked, note = None, f"attachment {name}: {why_att}"
+        except consult.CheckUnavailable as exc:
+            # Not a verdict: nothing is sent, and the message is left
+            # unread to be tried again — up to MAX_CHECK_ATTEMPTS runs,
+            # because each try composes the whole reply again.
+            return _check_unavailable(cfg, gmail, store, msg, row, str(exc))
         if checked is None:
             outcome = f"blocked by the pre-send check ({note[:200]})"
             log.warning("Not sending to %s: %s", ", ".join(sorted(recipients)), note)

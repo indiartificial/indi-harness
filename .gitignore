@@ -21,3 +21,6 @@ data/attachments/
 # it holds correspondents' addresses, so it stays on the machine.
 data/gmail_meta_cache.json
 data/gmail_meta_cache.json.tmp
+
+# Pre-send check retry counts (check_and_reply._check_unavailable).
+data/check_attempts.json

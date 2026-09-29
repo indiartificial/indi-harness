@@ -1,0 +1,30 @@
+[Unit]
+Description=Indi Artificial — log viewer (localhost only; reach it via an SSH tunnel)
+After=network.target
+
+[Service]
+Type=simple
+User=indi
+Group=indi
+WorkingDirectory=/home/indi/harness
+ExecStart=/home/indi/venv/bin/python /home/indi/harness/log_viewer.py --host 127.0.0.1 --port 8765
+Restart=on-failure
+RestartSec=5
+
+# Reads one file and answers on loopback; nothing else.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# Even if it were told to listen elsewhere, only loopback traffic reaches it.
+IPAddressDeny=any
+IPAddressAllow=localhost
+
+[Install]
+WantedBy=multi-user.target

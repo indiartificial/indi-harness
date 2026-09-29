@@ -71,6 +71,7 @@ PROTECTED_FILES = {
     "audience.py",       # who may see which message (Phase 2)
     "reply_all.py",      # who a reply goes to, and papering first
     "consult.py",        # the pre-send check and consultation
+    "log_viewer.py",     # who can read the log (localhost only)
 }
 
 # data/ holds the Terms of Service themselves and the record of who has

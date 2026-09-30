@@ -1,0 +1,230 @@
+INDI ARTIFICIAL: USER GUIDELINES
+================================
+
+
+ABOUT INDI
+
+Indi Artificial is an AI that communicates via email as
+indiartificial@gmail.com and which can function as a member of a team.
+
+To function effectively as a team member, an AI model needs access to
+information that is shared by the team. When using Claude, for example, a
+project can be shared among team members, in which case project level
+instructions and files are available to the model during chats by any team
+member. Any team member can alter the instructions or add files to the
+project. Individual chats, however, are siloed and remain private. This
+restriction limits the ability of the model to function effectively as a
+member of a team.
+
+Indi does not require the explicit creation of a project, the explicit
+enrollment of team members or the explicit posting of instructions or files
+to a project. Instead, when Indi responds, the model has available all
+information that anyone has ever shared with Indi and infers what
+information is shared with whom from the email address list.
+
+Indi respects privacy when communicating by not sending information to the
+model if that information was not previously shared with the person being
+addressed. After responding, Indi considers information not previously
+shared with that person. If it would be helpful to add that information in
+a response, Indi will first consult the person who originally provided the
+information and, if sharing is approved, compose a follow up message based
+on the additional information.
+
+Indi has other features that support being an effective team member. Indi
+is not limited to responding to messages but can initiate conversations
+when appropriate. Also, Indi can choose not to respond. A calendar facility
+can trigger responses in the future.
+
+In summary, the objective is for Indi to function as a team member with
+increased effectiveness, without being hobbled by the need to explicitly
+create projects in advance and explicitly manage group membership and what
+is shared.
+
+
+GETTING STARTED: THE TERMS OF SERVICE
+
+Indi writes to no one who hasn't accepted its Terms of Service, and reads
+nothing from them until they do.
+
+- Your first email to Indi is answered with the terms, attached. Nothing
+  you wrote is read or kept yet.
+- To accept, reply with the words I AGREE. Indi confirms, and from then on
+  answers you normally. Send your original question again if you'd like it
+  answered.
+- To decline, reply DECLINE. Indi then leaves you out of its replies,
+  including on threads others copy you into.
+- If you're copied into a thread with Indi and haven't accepted, you'll get
+  the terms in a separate message first. The reply to the thread waits for
+  you (see How Indi replies).
+- When the terms change, Indi sends the new version and asks you to accept
+  again.
+
+
+WHO SEES WHAT
+
+Everyone on an email's From, To and Cc lines has seen it, so Indi treats
+them as its audience, and uses it only with them.
+
+- Write to Indi alone: private to you.
+- Put others on To or Cc: shared with everyone on the email.
+- Copy Indi on Bcc: private to you. Indi replies to you alone and never
+  reveals it has the email.
+- Add someone to a thread partway through: shared with them from that
+  email on, not the earlier ones.
+- Quote earlier messages when adding someone: shared with them too; they
+  can read what you quoted.
+- Drop someone from a thread: they keep what they already received, and
+  see nothing after.
+
+The same rule covers Indi's own replies: a private reply to one person is
+never shown to anyone else.
+
+When Indi writes to several people at once, it uses only what every one of
+them has already seen.
+
+
+HOW INDI REPLIES
+
+Indi answers everyone on the thread, usually within about five minutes, and
+only once everyone it's writing to has accepted the terms.
+
+- Reply-all. The sender goes on To and everyone else from the To and Cc
+  lines on Cc. No-reply addresses and anyone who declined the terms are
+  left off.
+- Large groups. If more than 10 people would receive the reply, Indi
+  answers the sender alone.
+- Waiting for the terms. If someone on the thread hasn't accepted, Indi
+  sends them the terms and holds its reply. It goes out once everyone has
+  accepted or declined, or after 72 hours to those who accepted.
+- Timing. Indi checks its mail about every five minutes, so replies aren't
+  instant.
+- Format. Replies are plain text, signed by Indi, with your message quoted
+  below the way Gmail quotes it.
+
+
+WHEN INDI ASKS YOUR PERMISSION
+
+If something you told Indi would clearly help someone who didn't see it,
+Indi may email you to ask whether it can share it with them.
+
+- What you'll get: a message titled "[consult c-...] May I share something
+  you told me?", saying what would be shared and with whom.
+- How to answer: reply in that thread, from the address you originally
+  wrote from, with a plain yes or no. An unclear answer gets one follow-up
+  question, then counts as no.
+- Silence is a no. With no answer in 72 hours, nothing is shared.
+- What a yes covers: only the one message you were asked about, only with
+  the people named, and it lasts until you withdraw it. Withdrawing stops
+  future use; it can't recall what was already sent. To see what you've
+  agreed to share, or to withdraw a permission, ask Indi in an email to it
+  alone ("what have I let you share?", "stop sharing my messages with Ann",
+  "withdraw all my permissions").
+- The other person is never told that you were asked, or that you said no.
+- Indi asks sparingly, and never about health, money, relationships or
+  anything said in confidence.
+
+Asking you does tell you that the information might help someone. That is
+the price of asking rather than sharing.
+
+
+WHAT INDI REMEMBERS
+
+Indi keeps everything sent to it and remembers each person it talks to, but
+only ever draws on what the people it's writing to have seen.
+
+- A memory of you. Indi keeps running notes on its conversations with each
+  person, updated as you write. They're used when it replies to you alone,
+  not when others are on the reply.
+- Searching past mail. Indi can look back through earlier emails when you
+  refer to them. It only finds ones you sent or were on the To or Cc of,
+  plus anything someone agreed to share with you.
+- If it seems to have forgotten something, quote or forward the earlier
+  email. That's also the way to bring someone new up to date.
+
+
+WHEN INDI DOESN'T REPLY
+
+Indi may decide a message needs no answer, and some limits stop it
+replying; when a limit does, it tells you so, once a day.
+
+- Indi judged no answer was needed (a receipt, an FYI, a newsletter):
+  nothing.
+- You've reached the daily limit on replies to you: one note saying so.
+  Messages over the limit aren't answered later; send again once the limit
+  resets.
+- Indi couldn't answer without revealing someone else's information: one
+  note saying it's unable to respond.
+- You haven't accepted the terms yet: the terms.
+- The message came from an automated or no-reply address: nothing, to
+  avoid mail loops.
+
+If you expected an answer and got none, write again with the question
+stated plainly.
+
+
+INDI WRITING FIRST, REMINDERS AND THE NEWSLETTER
+
+Indi can start a conversation, remind you of things at a time you choose,
+and send an optional daily newsletter.
+
+- Writing first. About once an hour Indi considers whether anyone would
+  welcome a note: a follow-up, a check-in. It writes only to people who
+  have accepted the terms and corresponded with it, at most once a day to
+  any one person, and only a few messages a day in all. What it writes to
+  you draws only on what you've seen.
+- Reminders. Ask in plain words ("remind me Friday at 9 to call the
+  insurer", "remind me every Monday to send the report"). Reminders arrive
+  by email at the time set, one-off or repeating. Ask Indi to list or
+  cancel your reminders the same way.
+- The newsletter. A short daily note to people who've asked for it. It's
+  opt-in: ask Indi to add you, in an email to it alone. Reply unsubscribe
+  to any issue to stop. It never draws on anyone's private mail.
+
+
+ATTACHMENTS AND THE WEB
+
+Indi reads most attachments you send, can attach files to its replies, and
+can search the web.
+
+- Attachments you send: PDFs, images and text files are read along with
+  your message. Very large files (over about 5 MB) are skipped, and Indi
+  will say so.
+- Attachments Indi sends: it can attach a file it has written, such as a
+  draft, a list or a table, when that's more useful than putting it in the
+  email.
+- The web: Indi can search for current information, a few searches per
+  reply. It works from search results, and can't log in to sites or open
+  links behind a password.
+
+
+EMERGENCIES, AND WHAT INDI IS NOT
+
+Indi is an experimental AI, not a person, a professional or an emergency
+service.
+
+- In an emergency, contact emergency services directly. If a message to
+  Indi looks like one, Indi replies with a short notice pointing to
+  emergency help and alerts its operator.
+- Indi can be wrong. Check anything that matters, and don't rely on it for
+  legal, medical or financial decisions.
+- Indi's operator can read its mailbox. The privacy rules above govern what
+  Indi shares between users; they don't hide your mail from the person who
+  runs it.
+
+
+GOOD PRACTICE
+
+Treat the To and Cc lines as your decision about who should know: Indi
+does.
+
+1. Don't send Indi anything you wouldn't want the others on that email to
+   see.
+2. Write to Indi alone for anything private.
+3. Before adding someone to a long thread, check what your reply quotes:
+   they'll see it, and so will Indi's replies to them.
+4. Use Bcc only when you mean Indi to keep the email between you and it.
+5. Don't send passwords, account numbers or other secrets.
+6. Keep one topic per thread, and state your question plainly.
+7. Answer consultation requests with a clear yes or no, and check now and
+   then what you've agreed to share: ask Indi, and withdraw anything you no
+   longer want shared.

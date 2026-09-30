@@ -124,8 +124,19 @@ Recorded: you accepted version {{version}} of the Terms of Service on
 Write whenever you like — I'll reply properly from here on. If you want
 the terms again, ask, and if you change your mind, reply "DECLINE" at any
 time.
-
+{{guidelines_note}}
 {SIGNATURE}"""
+
+# Sent with the acceptance above, as an attachment, when the file exists:
+# how Indi decides who sees what, and what people can ask it to do. Kept in
+# data/ beside the terms, so Indi can't rewrite what it tells people about
+# itself (self_code.PROTECTED_DIRS).
+GUIDELINES_FILE = "indi-user-guidelines.txt"
+GUIDELINES_NOTE = """
+I've attached Indi's user guidelines: who sees what, how replies work, when
+I might ask your permission to share something, and what you can ask me to
+do. Worth a few minutes' read.
+"""
 
 DECLINE_ACKNOWLEDGED = f"""\
 Understood — you have declined the Terms of Service, and that is on
@@ -407,6 +418,20 @@ def _terms_attachment(current) -> tuple[tuple[str, str], ...]:
     return ((current.filename, current.text),)
 
 
+def _guidelines_attachment() -> tuple[tuple[str, str], ...]:
+    """The user guidelines from data/guidelines/, or nothing if the file
+    is missing or unreadable — the acceptance must go out either way."""
+    from pathlib import Path
+    path = Path(__file__).resolve().parent / "data" / "guidelines" / GUIDELINES_FILE
+    try:
+        text = path.read_text(encoding="utf-8")
+    except Exception:
+        log.warning("User guidelines not found at %s; sending the acceptance "
+                    "without them.", path)
+        return ()
+    return ((GUIDELINES_FILE, text),) if text.strip() else ()
+
+
 # ---------------------------------------------------------------------------
 # THE GATE
 # ---------------------------------------------------------------------------
@@ -446,11 +471,13 @@ def check_inbound(cfg, gmail, client, msg: dict, people) -> GateDecision:
             return GateDecision(False, "agreement received but no terms version "
                                        "available to record")
         updated = people.record_acceptance(sender, version)
+        guidelines = _guidelines_attachment()
         _send_fixed(cfg, gmail, msg, ACCEPTANCE_CONFIRMED.format(
             version=version,
             recorded_at=updated.accepted_at or "now",
             address=sender,
-        ))
+            guidelines_note=GUIDELINES_NOTE if guidelines else "",
+        ), attachments=guidelines)
         log.info("%s accepted terms version %s.", sender, version)
         return GateDecision(False, f"acceptance recorded (v{version})")
 

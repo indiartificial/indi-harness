@@ -63,6 +63,7 @@ INCLUDE: tuple[str, ...] = (
     "tests/*.py",
     "deploy/*",
     "data/terms/*",
+    "data/guidelines/*",
 )
 
 # Checked against every path component as well as the full path, so a

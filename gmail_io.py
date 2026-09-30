@@ -309,6 +309,40 @@ def _display(value: str) -> str:
         return value or ""
 
 
+_LIST_START = re.compile(r"^(?:[-*\u2022>#]\s|\d{1,3}[.)]\s)")
+_WRAPPED_AT_LEAST = 55
+
+
+def unwrap_paragraphs(text: str) -> str:
+    """Undo hard line-wrapping inside paragraphs, conservatively.
+
+    A line is joined to the one before only when that earlier line was
+    long enough to have been wrapped (55+ characters as written), neither
+    is blank, the earlier one doesn't end with a colon, and the new line
+    doesn't start a list item, a quote, a heading or a signature. Short
+    lines (an address, a poem, a sign-off) and lists stay as they are; an
+    indented line under a list item is joined to that item."""
+    out: list[str] = []
+    prev_raw = ""
+    for line in (text or "").split("\n"):
+        stripped = line.strip()
+        prev = prev_raw.rstrip()
+        join = bool(out and stripped and prev
+                    and len(prev) >= _WRAPPED_AT_LEAST
+                    and not prev.endswith(":")
+                    and not stripped.startswith(("-- ", "--- "))
+                    and stripped not in ("--", "---")
+                    and not _LIST_START.match(stripped))
+        if join and line[:1] in (" ", "\t") and not _LIST_START.match(out[-1].lstrip()):
+            join = False       # indented, and not under a list item: keep it
+        if join:
+            out[-1] = out[-1].rstrip() + " " + stripped
+        else:
+            out.append(line)
+        prev_raw = line
+    return "\n".join(out)
+
+
 def gmail_style_quote(msg: dict, tz_name: str = "UTC") -> str:
     """The attribution line and the original, each line prefixed "> ",
     in the form Gmail's own plain-text replies use — which Gmail, Outlook

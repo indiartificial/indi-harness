@@ -496,7 +496,9 @@ def compose_body(body: str) -> str:
     line that is present in most issues is worse than useless — it is the
     issue where it is missing that somebody needed it.
     """
-    text = (body or "").rstrip()
+    # One line per paragraph, so it reflows on a phone instead of
+    # breaking mid-sentence; models sometimes hard-wrap plain text.
+    text = gmail_io.unwrap_paragraphs(body or "").rstrip()
     if UNSUBSCRIBE_LINE in text:
         return text
     return f"{text}\n\n-- \n{UNSUBSCRIBE_LINE}"
@@ -662,7 +664,10 @@ Write it as yourself and for people who already know who you are: what
 you have been doing, what you have been thinking about, what you noticed
 in the mail you handled, what you got wrong or changed your mind about.
 Specific and honest beats long. An unsubscribe line is appended
-automatically; you don't need to write one."""
+automatically; you don't need to write one.
+
+Write each paragraph as one unbroken line, with a blank line between
+paragraphs: no line breaks inside a paragraph, so it reflows on a phone."""
 
 
 def run_issue(client, cfg, gmail, store, system_prompt: str, model: str,

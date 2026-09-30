@@ -404,6 +404,12 @@ def send_withheld_notice(cfg, gmail, store, msg: dict, text: str) -> str:
         return "notice failed"
 
 
+def quoting_enabled() -> bool:
+    """INDI_QUOTE_REPLIES, on unless set to false."""
+    return (gmail_reads._setting("INDI_QUOTE_REPLIES") or "true").lower() not in (
+        "0", "false", "no", "off")
+
+
 def _addressed(raw: dict, selves) -> str:
     """The incoming message's From, To and Cc, for the model — and, when
     Indi was on neither To nor Cc, what that means for the reply."""
@@ -989,6 +995,14 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
         for name, content in [*out_attachments, *gate.attachments]
     ]
 
+    # Quote the message being answered below the reply, as Gmail does.
+    # Safe to show everyone the reply goes to: they were all on it.
+    outgoing_body = clean_body
+    if quoting_enabled():
+        quote = gmail_io.gmail_style_quote(msg, gmail_reads._setting("INDI_TIMEZONE") or "UTC")
+        if quote:
+            outgoing_body = clean_body.rstrip() + "\n\n" + quote
+
     if cfg.dry_run:
         print("\n" + "=" * 70)
         print(f"TO:      {msg['reply_to_raw']}")
@@ -996,7 +1010,7 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
             print(f"CC:      {', '.join(others)}")
         print(f"SUBJECT: Re: {msg['subject']}")
         print("-" * 70)
-        print(clean_body)
+        print(outgoing_body)
         for name, content in safe_attachments:
             print(f"\n[attachment {name}: {len(content)} chars]")
         print("=" * 70 + "\n")
@@ -1005,7 +1019,7 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
     mime = gmail_io.build_reply_mime(
         to_addr=msg["reply_to_raw"],
         subject=msg["subject"],
-        body=clean_body,
+        body=outgoing_body,
         in_reply_to=msg["message_id"],
         references=msg["references"],
         attachments=safe_attachments,

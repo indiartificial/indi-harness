@@ -181,6 +181,9 @@ def _addr_of(header_value: str) -> str:
     return (parseaddr(header_value or "")[1] or "").strip().lower()
 
 
+QUOTE_MAX_CHARS = 50_000
+
+
 def extract_message(message: dict, max_body_chars: int,
                     max_quoted_chars: int = 0) -> dict:
     """Turns a Gmail `format=full` message into a normalised dict.
@@ -238,6 +241,10 @@ def extract_message(message: dict, max_body_chars: int,
             raw = decode(top["data"])
             body = html_to_text(raw) if payload.get("mimeType") == "text/html" else raw
 
+    # The whole text, before its quoted history is split off: what a reply
+    # quotes back, the way Gmail does (gmail_style_quote).
+    full_text = body.strip()[:QUOTE_MAX_CHARS]
+
     body, quoted = split_quoted(body.strip())
     if not body and quoted:
         # Nothing but a quoted chain — a bare forward. Show it as the
@@ -285,7 +292,53 @@ def extract_message(message: dict, max_body_chars: int,
         "quoted_truncated": quoted_truncated,
         "attachment_refs": attachment_refs,
         "internal_date": internal_date,
+        "full_text": full_text,
     }
+
+
+# ---------------------------------------------------------------------------
+# QUOTING THE MESSAGE BEING ANSWERED, AS GMAIL DOES
+# ---------------------------------------------------------------------------
+
+def _display(value: str) -> str:
+    """A header value with any =?utf-8?...?= encoded words decoded."""
+    from email.header import decode_header, make_header
+    try:
+        return str(make_header(decode_header(value or "")))
+    except Exception:
+        return value or ""
+
+
+def gmail_style_quote(msg: dict, tz_name: str = "UTC") -> str:
+    """The attribution line and the original, each line prefixed "> ",
+    in the form Gmail's own plain-text replies use — which Gmail, Outlook
+    and Apple Mail all recognise and fold away:
+
+        On Mon, Sep 29, 2026 at 6:52 PM Steven J. Halasz <s@example.com> wrote:
+
+        > the original, including its own earlier quotes (which become >>)
+
+    Empty when the message had no text. `tz_name` is an IANA zone name
+    (INDI_TIMEZONE); an unknown one falls back to UTC."""
+    import datetime as _dt
+    text = (msg.get("full_text") or "").strip("\n")
+    if not text.strip():
+        return ""
+    try:
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo(tz_name or "UTC")
+    except Exception:
+        tz = _dt.timezone.utc
+    when = ""
+    if msg.get("internal_date"):
+        stamp = _dt.datetime.fromtimestamp(msg["internal_date"] / 1000, tz=tz)
+        hour = stamp.strftime("%I").lstrip("0") or "12"
+        when = (f"{stamp.strftime('%a')}, {stamp.strftime('%b')} {stamp.day}, "
+                f"{stamp.year} at {hour}:{stamp.strftime('%M %p')} ")
+    who = _display(msg.get("from_raw", "")).strip() or "someone"
+    quoted = "\n".join((">" if line.startswith(">") else "> ") + line if line else ">"
+                       for line in text.split("\n"))
+    return f"On {when}{who} wrote:\n\n{quoted}\n"
 
 
 # ---------------------------------------------------------------------------

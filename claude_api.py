@@ -69,6 +69,7 @@ import attachments
 import costs
 import gmail_store
 import outbound
+import self_service
 import sheets_queue
 
 log = logging.getLogger("indi.claude")
@@ -524,6 +525,12 @@ def build_tools(cfg, trusted: bool, have_store: bool,
         tools.append(outbound.reply_reminder_schema(reminder_sender))
         tools.append(outbound.reply_list_reminders_schema(reminder_sender))
         tools.append(outbound.reply_cancel_reminder_schema(reminder_sender))
+
+    # Self-service (self_service.py): the sender's own sharing permissions
+    # and newsletter subscription. Only in a reply to them alone — whom
+    # someone lets see their mail is theirs, not the thread's.
+    if have_store and reminder_sender and not shared_reply:
+        tools.extend(self_service.schemas(reminder_sender))
 
     # The agenda (agenda.py). `agenda_owner` is set by check_and_reply.py
     # only for a sender who already holds the self-modification or
@@ -1092,6 +1099,14 @@ def generate_reply(client, cfg, system_prompt: str, msg: dict,
                 text, is_error = outbound.handle_reply_cancel_reminder(
                     cfg, store, msg["from_addr"], call.input
                 )
+            elif call.name in self_service.TOOL_NAMES:
+                # Checked again rather than trusted from the tool list; the
+                # subject is always the sender, never an argument.
+                if shared or store is None:
+                    text, is_error = "Not available in a reply to several people.", True
+                else:
+                    text, is_error = self_service.handle(cfg, store, msg["from_addr"],
+                                                         call.name, call.input)
             elif call.name in agenda.TOOL_NAMES:
                 # Checked again here rather than trusted from the tool list:
                 # a tool the model names without having been offered it is

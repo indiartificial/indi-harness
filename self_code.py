@@ -72,6 +72,7 @@ PROTECTED_FILES = {
     "reply_all.py",      # who a reply goes to, and papering first
     "consult.py",        # the pre-send check and consultation
     "log_viewer.py",     # who can read the log (localhost only)
+    "self_service.py",   # a sender withdrawing sharing, joining the newsletter
 }
 
 # data/ holds the Terms of Service themselves and the record of who has

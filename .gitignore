@@ -24,3 +24,7 @@ data/gmail_meta_cache.json.tmp
 
 # Pre-send check retry counts (check_and_reply._check_unavailable).
 data/check_attempts.json
+
+# Alert rate-limiting state (alerts.py).
+data/alert_state.json
+data/alert_state.tmp

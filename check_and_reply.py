@@ -80,6 +80,7 @@ import costs
 import gmail_io
 import gmail_reads
 import drive_tables
+import alerts
 import audience
 import consult
 import gmail_store
@@ -157,7 +158,10 @@ def acquire_lock(lock_path: Path) -> locking.FileLock:
     try:
         return locking.FileLock(lock_path).acquire()
     except locking.LockBusy:
-        raise SystemExit("Another run is already in progress — exiting.")
+        # Normal, not a failure: two runs overlapped. Exit 0 so systemd
+        # doesn't report the unit failed (and alerts.py doesn't page anyone).
+        logging.getLogger("indi").info("Another run is already in progress — exiting.")
+        raise SystemExit(0)
 
 
 def get_credentials(cfg: Config):
@@ -1169,6 +1173,11 @@ def main() -> int:
     args = parse_args()
     cfg = Config.from_env(dry_run=args.dry_run, non_interactive=args.non_interactive)
     setup_logging(cfg.log_path, args.verbose)
+    # Counts this run's ERROR lines for the end-of-run alert (alerts.py).
+    monitor = alerts.RunMonitor()
+    logging.getLogger().addHandler(monitor)
+    run_mode = "heartbeat" if args.heartbeat else "mail"
+    run_failures = 0
 
     lock = acquire_lock(cfg.lock_path)
     store = None
@@ -1333,8 +1342,22 @@ def main() -> int:
                     log.debug("Could not record failure status", exc_info=True)
 
         log.info("Run complete: %d message(s), %d failure(s).", len(details), failures)
+        run_failures = failures
         return 1 if failures else 0
     finally:
+        # Tell the phone, and check in with the dead-man's switch. Never in
+        # a dry run; never able to raise.
+        crashed = sys.exc_info()[1]
+        if isinstance(crashed, SystemExit):
+            crashed = None if crashed.code in (0, None) else crashed
+        if not cfg.dry_run and not getattr(args, "message_id", None):
+            try:
+                alerts.after_run(run_mode, monitor, run_failures, crashed)
+                if crashed is None:
+                    alerts.ping("INDI_HEALTHCHECK_URL" if run_mode == "mail"
+                                else "INDI_HEALTHCHECK_HEARTBEAT_URL")
+            except Exception:
+                log.warning("Alerting failed.", exc_info=True)
         # In `finally` so a run that raised still records what it spent
         # before dying — those calls were billed either way. Covers the
         # heartbeat and the no-mail path too, which return early.

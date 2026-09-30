@@ -73,6 +73,7 @@ PROTECTED_FILES = {
     "consult.py",        # the pre-send check and consultation
     "log_viewer.py",     # who can read the log (localhost only)
     "self_service.py",   # a sender withdrawing sharing, joining the newsletter
+    "alerts.py",         # tells the operator when something fails
 }
 
 # data/ holds the Terms of Service themselves and the record of who has

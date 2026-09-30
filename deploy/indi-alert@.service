@@ -1,0 +1,14 @@
+[Unit]
+Description=Indi Artificial — push an alert that %i failed (see alerts.py)
+
+[Service]
+Type=oneshot
+User=indi
+Group=indi
+WorkingDirectory=/home/indi/harness
+ExecStart=/home/indi/venv/bin/python /home/indi/harness/alerts.py unit-failed %i
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/indi/harness/data

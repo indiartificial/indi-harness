@@ -100,30 +100,20 @@ SIGNATURE = "--- Indi"
 # and not a code change. Each ends with the standard signature.
 
 COVERING_NOTE = f"""\
-Hello — this is Indi Artificial, an experimental AI email correspondent
-operated by Steven J. Halasz.
+Hello — this is Indi Artificial, an experimental AI email correspondent operated by Steven J. Halasz.
 
-Before I reply to anything substantive, you need to accept the Terms of
-Service attached to this message. They are short on promises and long on
-warnings: I am software, not a person; nobody reads this mailbox in real
-time; I can be confidently and completely wrong; and what you send me is
-stored and may be quoted.
+Before I reply to anything substantive, you need to accept the Terms of Service attached to this message. They are short on promises and long on warnings: I am software, not a person; nobody reads this mailbox in real time; I can be confidently and completely wrong; and what you send me is stored and may be quoted.
 
-To accept, reply with "I AGREE" and nothing else is required. To decline,
-reply "DECLINE" and I will not write to you again.
+To accept, reply with "I AGREE" and nothing else is required. To decline, reply "DECLINE" and I will not write to you again.
 
-This is not a crisis line. If you need help now, call 911, or 988 for the
-Suicide and Crisis Lifeline.
+This is not a crisis line. If you need help now, call 911, or 988 for the Suicide and Crisis Lifeline.
 
 {SIGNATURE}"""
 
 ACCEPTANCE_CONFIRMED = f"""\
-Recorded: you accepted version {{version}} of the Terms of Service on
-{{recorded_at}} from {{address}}.
+Recorded: you accepted version {{version}} of the Terms of Service on {{recorded_at}} from {{address}}.
 
-Write whenever you like — I'll reply properly from here on. If you want
-the terms again, ask, and if you change your mind, reply "DECLINE" at any
-time.
+Write whenever you like — I'll reply properly from here on. If you want the terms again, ask, and if you change your mind, reply "DECLINE" at any time.
 {{guidelines_note}}
 {SIGNATURE}"""
 
@@ -133,32 +123,24 @@ time.
 # itself (self_code.PROTECTED_DIRS).
 GUIDELINES_FILE = "indi-user-guidelines.txt"
 GUIDELINES_NOTE = """
-I've attached Indi's user guidelines: who sees what, how replies work, when
-I might ask your permission to share something, and what you can ask me to
-do. Worth a few minutes' read.
+I've attached Indi's user guidelines: who sees what, how replies work, when I might ask your permission to share something, and what you can ask me to do. Worth a few minutes' read.
 """
 
 DECLINE_ACKNOWLEDGED = f"""\
-Understood — you have declined the Terms of Service, and that is on
-record. This is the last message you will get from me.
+Understood — you have declined the Terms of Service, and that is on record. This is the last message you will get from me.
 
-If you ever change your mind, reply "I AGREE" and I'll pick things up
-from there.
+If you ever change your mind, reply "I AGREE" and I'll pick things up from there.
 
 {SIGNATURE}"""
 
 EMERGENCY_REPLY = f"""\
-This reads like an emergency, and I am the wrong thing to be reaching.
-I am an automated email correspondent. Nobody reads this mailbox in real
-time, and my next reply could be hours away.
+This reads like an emergency, and I am the wrong thing to be reaching. I am an automated email correspondent. Nobody reads this mailbox in real time, and my next reply could be hours away.
 
 If anyone is in danger right now, call 911.
 
-In the United States you can also call or text 988, the Suicide and
-Crisis Lifeline, at any hour, any day.
+In the United States you can also call or text 988, the Suicide and Crisis Lifeline, at any hour, any day.
 
-I have forwarded your message to the person who operates this service.
-He is not on call either, so please do not wait for him.
+I have forwarded your message to the person who operates this service. He is not on call either, so please do not wait for him.
 
 {SIGNATURE}"""
 

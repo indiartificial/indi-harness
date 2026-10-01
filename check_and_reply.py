@@ -943,7 +943,12 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
     # Only when there is something the recipients may not see: the
     # composer was never shown it, so this is the backstop. One rewrite,
     # then the message is left unanswered rather than sent with a leak.
-    private = consult.candidates(store, recipients) if consult_on else []
+    # Not for a reply to the operator alone: they can read the whole
+    # mailbox, so nothing in it can leak to them, and a check could only
+    # get in the way.
+    operator_only = all(terms_gate.is_operator(r) for r in recipients)
+    private = (consult.candidates(store, recipients)
+               if consult_on and not operator_only else [])
     if private:
         try:
             # What the recipients have already seen, so the check can tell
@@ -954,6 +959,11 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
                 thread_text and f"THE THREAD:\n{thread_text}",
                 (not others and memory.body) and f"WHAT THEY TOLD INDI BEFORE:\n{memory.body}",
                 (not others and pending) and f"RECENT EXCHANGES WITH THEM:\n{pending}",
+                stats.get("tool_outputs") and (
+                    "WHAT INDI LOOKED UP WHILE WRITING (history searches already "
+                    "limited to these recipients, its own source code, files, the "
+                    "web — none of it private to anyone else):\n"
+                    + "\n\n".join(stats["tool_outputs"])),
             ) if p)
             checked, note = consult.vet(claude, cfg, clean_body, recipients, private, seen)
             for name, content in out_attachments:

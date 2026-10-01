@@ -1003,7 +1003,11 @@ def generate_reply(client, cfg, system_prompt: str, msg: dict,
              "cache_read": 0, "cache_created": 0, "iterations": 0,
              # Every billable token this message consumes, summed across
              # the tool loop. Priced by the caller, which knows the model.
-             "tokens": {f: 0 for f in costs.TOKEN_FIELDS}}
+             "tokens": {f: 0 for f in costs.TOKEN_FIELDS},
+             # What the writer looked up while writing — tool results, already
+             # limited to what the recipients may see — so the pre-send check
+             # can tell a fact Indi looked up from one it had no business with.
+             "tool_outputs": []}
     response = None
     # Empty means "search everything"; otherwise the search is pinned to
     # this sender's own messages, enforced here rather than in the prompt.
@@ -1165,6 +1169,8 @@ def generate_reply(client, cfg, system_prompt: str, msg: dict,
             }
             if is_error:
                 block["is_error"] = True
+            elif sum(len(t) for t in stats["tool_outputs"]) < 30000:
+                stats["tool_outputs"].append(f"[{call.name}]\n{str(text)[:6000]}")
             results.append(block)
 
         # Move the rolling breakpoint onto the newest tool result, so the

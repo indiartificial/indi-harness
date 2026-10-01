@@ -364,3 +364,30 @@ def test_process_message_gives_the_check_the_senders_own_words(tmp_path, people,
     _go(gmail, _cfg(tmp_path), store, people)
     assert seen and "THEIR MESSAGE" in seen[0] and "lunch?" in seen[0]
     assert len(gmail.sent) == 1
+
+
+def test_the_check_is_told_what_the_writer_looked_up(tmp_path, people, reply, monkeypatch):
+    monkeypatch.setattr(consult, "enabled", lambda cfg=None: True)
+    monkeypatch.setattr(consult, "match", lambda store, msg: None)
+    monkeypatch.setattr(consult, "candidates", lambda store, r, limit=10: [{"x": 1}])
+    monkeypatch.setattr(consult, "after_reply", lambda *a: [])
+    monkeypatch.setattr(claude_api, "generate_reply", lambda *a, **k: (
+        "Nothing schedules the Drive backup.\n\n--- Indi",
+        {**STATS, "tool_outputs": ["[read_own_source]\ndeploy/ has no backup timer"]}))
+    seen = []
+    monkeypatch.setattr(consult, "vet",
+                        lambda client, cfg, draft, r, items, s="": seen.append(s) or (draft, "ok"))
+    _go(FakeGmail(), _cfg(tmp_path), ReplyStore(), people)
+    assert "LOOKED UP WHILE WRITING" in seen[0] and "no backup timer" in seen[0]
+
+
+def test_a_reply_to_the_operator_alone_is_not_checked(tmp_path, people, reply, monkeypatch):
+    import terms_gate
+    monkeypatch.setattr(consult, "enabled", lambda cfg=None: True)
+    monkeypatch.setattr(consult, "match", lambda store, msg: None)
+    monkeypatch.setattr(consult, "candidates",
+                        lambda *a, **k: pytest.fail("checked a reply to the operator"))
+    monkeypatch.setattr(terms_gate, "is_operator", lambda addr: True)
+    gmail = FakeGmail()
+    _go(gmail, _cfg(tmp_path), ReplyStore(), people)
+    assert len(gmail.sent) == 1

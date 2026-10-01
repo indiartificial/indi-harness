@@ -450,14 +450,14 @@ def build_store(cfg: Config, gmail, drive, sheets):
         store = gmail_store.GmailStore(
             drive_tables.DriveSheets(drive_tables.DriveIO(drive)),
             drive, cfg, gmail, records_in_drive=True)
-        log.info("Mail reads come from Gmail (INDI_GMAIL_READS); records "
+        log.debug("Mail reads come from Gmail (INDI_GMAIL_READS); records "
                  "are in Drive (INDI_DRIVE_RECORDS).")
     elif gmail_store.gmail_reads_enabled(cfg):
         # Step 5 of MIGRATE-GMAIL.md: Gmail answers every read about
         # mail; the sheet is still written, and still answers for the
         # journal, costs, reminders and newsletter.
         store = gmail_store.GmailStore(sheets, drive, cfg, gmail)
-        log.info("Mail reads come from Gmail (INDI_GMAIL_READS).")
+        log.debug("Mail reads come from Gmail (INDI_GMAIL_READS).")
     else:
         store = sheets_queue.SheetStore(
             sheets, drive, cfg,
@@ -1195,7 +1195,9 @@ def main() -> int:
         if cfg.dry_run:
             log.info("DRY RUN — no mail sent, no sheets or memory written.")
         if cfg.send_automatically and not cfg.dry_run:
-            log.warning("INDI_SEND_AUTOMATICALLY is on: replies go out without review.")
+            # Start-of-run notices like this one go to DEBUG: written only
+            # with --verbose, so the log isn't the same lines every 5 minutes.
+            log.debug("INDI_SEND_AUTOMATICALLY is on: replies go out without review.")
         problems = cfg.validate_local_tools() + cfg.validate_claude_code()
         if problems:
             for problem in problems:
@@ -1204,7 +1206,7 @@ def main() -> int:
                 "Refusing to start with an unsafe local-tools configuration."
             )
         if cfg.enable_claude_code:
-            log.warning(
+            log.debug(
                 "CLAUDE CODE SESSIONS ARE ON for %s. These senders can have "
                 "Indi run an unrestricted coding agent over this harness — "
                 "every file, including the credentials, the permission checks "
@@ -1214,7 +1216,7 @@ def main() -> int:
                 cfg.claude_code_timeout,
             )
         if cfg.enable_local_files or cfg.enable_local_exec:
-            log.warning(
+            log.debug(
                 "Local machine access is ON for %s. Files: %s%s. Exec: %s.",
                 ", ".join(cfg.local_tools_senders),
                 cfg.local_files_root if cfg.enable_local_files else "off",
@@ -1250,7 +1252,7 @@ def main() -> int:
                 "a version file is put there.", terms.TERMS_DIR,
             )
         else:
-            log.info("Terms of service v%s in force (%s).",
+            log.debug("Terms of service v%s in force (%s).",
                      current_terms.version, current_terms.path.name)
 
         if args.heartbeat:

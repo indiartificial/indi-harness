@@ -678,6 +678,69 @@ def _attachment_part(filename: str, content: str):
     return part, filename
 
 
+def html_enabled() -> bool:
+    """INDI_HTML_EMAIL, on unless set to false."""
+    value = (os.environ.get("INDI_HTML_EMAIL") or "").strip().lower()
+    if not value:
+        try:
+            import gmail_reads
+            value = gmail_reads._setting("INDI_HTML_EMAIL").lower()
+        except Exception:
+            value = ""
+    return value not in ("0", "false", "no", "off")
+
+
+_URL = re.compile(r"(https?://[^\s<>\"]+[^\s<>\".,;:!?)\]])")
+_QUOTE_STYLE = "margin:0 0 0 .8ex;border-left:1px #ccc solid;padding-left:1ex"
+
+
+def text_to_html(text: str) -> str:
+    """The same words as HTML that reflows: a paragraph per blank-line
+    block, line breaks inside a block kept as <br>, "> " quoting as Gmail's
+    own quote blocks (nested for ">>"), links made clickable. Everything
+    is escaped; nothing in the text is ever treated as markup."""
+    import html as _html
+
+    def inline(line: str) -> str:
+        out, last = [], 0
+        for m in _URL.finditer(line):
+            out.append(_html.escape(line[last:m.start()]))
+            url = _html.escape(m.group(1))
+            out.append(f'<a href="{url}">{url}</a>')
+            last = m.end()
+        out.append(_html.escape(line[last:]))
+        return "".join(out)
+
+    def render(lines: list[str]) -> str:
+        parts, para, i = [], [], 0
+        def flush():
+            if para:
+                parts.append("<p>" + "<br>".join(inline(l) for l in para) + "</p>")
+                para.clear()
+        while i < len(lines):
+            line = lines[i]
+            if line.startswith(">"):
+                flush()
+                quoted = []
+                while i < len(lines) and lines[i].startswith(">"):
+                    q = lines[i][1:]
+                    quoted.append(q[1:] if q.startswith(" ") else q)
+                    i += 1
+                parts.append(f'<blockquote class="gmail_quote" style="{_QUOTE_STYLE}">'
+                             + render(quoted) + "</blockquote>")
+                continue
+            if not line.strip():
+                flush()
+            else:
+                para.append(line)
+            i += 1
+        flush()
+        return "".join(parts)
+
+    body = render((text or "").replace("\r\n", "\n").split("\n"))
+    return f'<!DOCTYPE html><html><body><div dir="auto">{body}</div></body></html>'
+
+
 def build_reply_mime(to_addr: str, subject: str, body: str, in_reply_to: str,
                      references: str = "", attachments=None,
                      from_addr: str = "", cc=None) -> dict:
@@ -688,14 +751,26 @@ def build_reply_mime(to_addr: str, subject: str, body: str, in_reply_to: str,
     if not subject.lower().startswith("re:"):
         subject = f"Re: {subject}"
 
+    # Plain text and an HTML copy of the same words. Some mail apps — the
+    # Gmail app on the iPhone among them — show plain text with a hard
+    # break every 78 or so characters, cutting paragraphs mid-sentence;
+    # every app reflows HTML to the screen. INDI_HTML_EMAIL=false sends
+    # plain text alone, as before.
+    if html_enabled():
+        content = MIMEMultipart("alternative")
+        content.attach(MIMEText(body, "plain", "utf-8"))
+        content.attach(MIMEText(text_to_html(body), "html", "utf-8"))
+    else:
+        content = MIMEText(body, _charset="utf-8")
+
     if attachments:
         msg = MIMEMultipart()
-        msg.attach(MIMEText(body, _charset="utf-8"))
-        for filename, content in attachments:
-            part, _ = _attachment_part(filename, content)
+        msg.attach(content)
+        for filename, content_ in attachments:
+            part, _ = _attachment_part(filename, content_)
             msg.attach(part)
     else:
-        msg = MIMEText(body, _charset="utf-8")
+        msg = content
 
     msg["To"] = to_addr
     if cc:

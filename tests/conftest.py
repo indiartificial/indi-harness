@@ -21,3 +21,11 @@ def consultation_off_unless_asked(monkeypatch):
     monkeypatch.setenv("INDI_CONSULT", "false")
     for suffix in ("_LINUX", "_WINDOWS", "_MACOS"):
         monkeypatch.delenv("INDI_CONSULT" + suffix, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def plain_text_mail_unless_asked(monkeypatch):
+    """Most tests read the plain-text body straight off the message they
+    capture. Replies now also carry an HTML copy (gmail_io.text_to_html);
+    those tests run with it off, and test_html_email.py turns it on."""
+    monkeypatch.setenv("INDI_HTML_EMAIL", "false")

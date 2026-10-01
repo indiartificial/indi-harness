@@ -276,3 +276,56 @@ def test_upgraded_file_then_behaves_like_any_v2_file(drive):
     memory_file.consolidate(FakeClient(NEW_BODY), _cfg(), None, store, ALICE)
     store.rows.append({**store.rows[0], "gmail_msg_id": "m4", "received_at": "2026-09-30"})
     assert _pending(store) == ["m4"]
+
+
+# --------------------------------------------------------------------------
+# A FILE THAT OUTGROWS ITS LIMIT
+# --------------------------------------------------------------------------
+
+class ScriptedClient(FakeClient):
+    """Each call answers with the next (text, stop_reason)."""
+
+    def __init__(self, *answers):
+        super().__init__("")
+        self.answers = list(answers)
+        self.systems = []
+
+    def stream(self, **kwargs):
+        self.systems.append(kwargs["system"])
+        text, stop = self.answers.pop(0)
+        response = SimpleNamespace(content=[SimpleNamespace(type="text", text=text)],
+                                   stop_reason=stop, usage=None)
+
+        class Ctx:
+            def __enter__(self_inner):
+                return SimpleNamespace(get_final_message=lambda: response)
+
+            def __exit__(self_inner, *a):
+                return False
+        return Ctx()
+
+
+def test_the_model_is_given_a_length_it_can_finish_in(drive):
+    store = FakeStore(["m1", "m2"])
+    client = ScriptedClient((NEW_BODY, "end_turn"))
+    memory_file.consolidate(client, _cfg(), None, store, ALICE)
+    assert f"under about {memory_file.budget_words(_cfg())} words" in client.systems[0]
+
+
+def test_a_cut_off_rewrite_is_retried_tighter_and_saved(drive):
+    store = FakeStore(["m1", "m2"])
+    long_old = "Alice detail. " * 2000                   # far over the budget
+    _put(drive, memory_file.serialise_memory(ALICE, set(), long_old))
+    condensed = "Alice: likes tea; " * 300           # about the budget
+    client = ScriptedClient(("half a fi", "max_tokens"), (condensed, "end_turn"))
+    assert memory_file.consolidate(client, _cfg(), None, store, ALICE) is True
+    assert "cut off" in client.systems[1]
+    assert memory_file.parse_memory(_get(drive))[1].strip() == condensed.strip()
+
+
+def test_cut_off_twice_still_refuses_to_overwrite(drive):
+    store = FakeStore(["m1", "m2"])
+    _put(drive, memory_file.serialise_memory(ALICE, set(), "Alice likes tea.\n"))
+    client = ScriptedClient(("trunc", "max_tokens"), ("trunc", "max_tokens"))
+    assert memory_file.consolidate(client, _cfg(), None, store, ALICE) is False
+    assert "Alice likes tea." in _get(drive)

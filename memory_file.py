@@ -401,26 +401,44 @@ def consolidate(client, cfg, drive_service, store, sender_addr: str) -> bool:
         f"{recent_text}"
     )
 
-    try:
-        with client.messages.stream(
-            model=cfg.model,
-            # Was hardcoded at 1024, which truncated the file and then
-            # overwrote the original with the truncated text.
-            max_tokens=cfg.memory_max_tokens,
-            system=CONSOLIDATION_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_content}],
-        ) as streamed:
-            response = streamed.get_final_message()
-    except Exception as exc:
-        log.error("Memory consolidation call failed for %s: %s", sender_addr, exc)
-        return False
-
-    costs.record("memory", cfg.model,
-                 costs.tokens_from_usage(getattr(response, "usage", None)),
-                 note=sender_addr)
+    # A length budget the output can actually fit in, stated up front. The
+    # file only grows; without one, it outgrows INDI_MEMORY_MAX_TOKENS, every
+    # rewrite is cut off, and memory stops updating. If an attempt is cut
+    # off anyway, one retry with a tighter budget and an explicit warning.
+    budget = budget_words(cfg)
+    response = None
+    for attempt, words in enumerate((budget, int(budget * 0.7))):
+        system = CONSOLIDATION_SYSTEM_PROMPT + LENGTH_RULE.format(words=words)
+        if attempt:
+            system += RETRY_NOTE
+        try:
+            with client.messages.stream(
+                model=cfg.model,
+                # Was hardcoded at 1024, which truncated the file and then
+                # overwrote the original with the truncated text.
+                max_tokens=cfg.memory_max_tokens,
+                system=system,
+                messages=[{"role": "user", "content": user_content}],
+            ) as streamed:
+                response = streamed.get_final_message()
+        except Exception as exc:
+            log.error("Memory consolidation call failed for %s: %s", sender_addr, exc)
+            return False
+        costs.record("memory", cfg.model,
+                     costs.tokens_from_usage(getattr(response, "usage", None)),
+                     note=sender_addr)
+        if getattr(response, "stop_reason", "") != "max_tokens":
+            break
+        log.warning("Memory for %s ran past INDI_MEMORY_MAX_TOKENS; condensing harder.",
+                    sender_addr)
 
     new_body = _extract_text(response)
-    ok, reason = _validate(new_body, memory.body, response)
+    # Condensing an over-long file is the point here: when the old file
+    # was itself over budget, judge shrinkage against the budget (about
+    # six characters a word), not against the bloated original.
+    over = len(memory.body.split()) > budget
+    ok, reason = _validate(new_body, memory.body, response,
+                           reference_chars=budget * 6 if over else None)
     if not ok:
         log.error("Refusing to overwrite memory for %s: %s", sender_addr, reason)
         return False
@@ -451,14 +469,31 @@ def consolidate(client, cfg, drive_service, store, sender_addr: str) -> bool:
     return True
 
 
-def _validate(new_body: str, old_body: str, response) -> tuple[bool, str]:
+LENGTH_RULE = """
+
+Length: keep the whole file under about {words} words. When the current file plus what's new would be longer, condense — merge related points, shorten wording, drop what is least likely to matter again — rather than letting it grow. Always finish the file; never stop part-way."""
+
+RETRY_NOTE = """
+
+Your previous attempt was too long and was cut off. Be much more concise this time."""
+
+
+def budget_words(cfg) -> int:
+    """Words the file may run to: well inside INDI_MEMORY_MAX_TOKENS
+    (about 0.75 words a token), leaving room for the model to finish."""
+    return max(200, int(getattr(cfg, "memory_max_tokens", 4000) * 0.75 * 0.6))
+
+
+def _validate(new_body: str, old_body: str, response,
+              reference_chars: int | None = None) -> tuple[bool, str]:
     """Guards against the two ways the old code destroyed memory: a
     truncated generation, and an empty one."""
     if getattr(response, "stop_reason", "") == "max_tokens":
         return False, "response hit max_tokens and is truncated"
     if len(new_body) < 20:
         return False, f"response too short ({len(new_body)} chars)"
-    if old_body.strip() and len(new_body) < 0.4 * len(old_body):
+    reference = min(len(old_body), reference_chars or len(old_body))
+    if old_body.strip() and len(new_body) < 0.4 * reference:
         return False, (
             f"new memory is {len(new_body)} chars vs {len(old_body)} previously "
             "— implausible shrinkage"

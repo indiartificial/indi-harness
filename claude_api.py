@@ -67,6 +67,7 @@ import re
 import agenda
 import attachments
 import costs
+import followups
 import gmail_store
 import outbound
 import self_service
@@ -525,6 +526,16 @@ def build_tools(cfg, trusted: bool, have_store: bool,
         tools.append(outbound.reply_reminder_schema(reminder_sender))
         tools.append(outbound.reply_list_reminders_schema(reminder_sender))
         tools.append(outbound.reply_cancel_reminder_schema(reminder_sender))
+
+    # Follow-ups (followups.py): Indi planning to come back to this thread.
+    # Scheduling is offered on any reply — the note is written from what
+    # this reply's recipients have seen; listing and cancelling only to the
+    # sender alone.
+    if have_store and reminder_sender and followups.enabled():
+        tools.append(followups.schedule_schema())
+        if not shared_reply:
+            tools.append(followups.list_schema(reminder_sender))
+            tools.append(followups.cancel_schema(reminder_sender))
 
     # Self-service (self_service.py): the sender's own sharing permissions
     # and newsletter subscription. Only in a reply to them alone — whom
@@ -1099,6 +1110,12 @@ def generate_reply(client, cfg, system_prompt: str, msg: dict,
                 text, is_error = outbound.handle_reply_cancel_reminder(
                     cfg, store, msg["from_addr"], call.input
                 )
+            elif call.name in followups.REPLY_TOOL_NAMES:
+                if store is None:
+                    text, is_error = "Not available.", True
+                else:
+                    text, is_error = followups.handle_reply_tool(
+                        store, msg, recipients, call.name, call.input, shared)
             elif call.name in self_service.TOOL_NAMES:
                 # Checked again rather than trusted from the tool list; the
                 # subject is always the sender, never an argument.

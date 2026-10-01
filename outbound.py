@@ -148,6 +148,7 @@ import os
 import uuid
 
 import agenda
+import followups
 import costs
 import gmail_io
 import newsletter
@@ -1337,6 +1338,18 @@ def run_heartbeat(client, cfg, gmail, store, system_prompt: str,
         log.error("Reminder delivery failed", exc_info=True)
         reminder_outcomes = ["reminder delivery raised an error (see log)"]
     prefix = ("; ".join(reminder_outcomes) + "; ") if reminder_outcomes else ""
+
+    # Follow-ups Indi planned for itself (followups.py) that are now due:
+    # each is put in front of the model, which must send or skip. Their own
+    # daily budget; not the initiative budget below.
+    if followups.enabled():
+        try:
+            done = followups.run_due(client, cfg, gmail, store, system_prompt,
+                                     self_addrs, people, heartbeat_model(cfg))
+            if done:
+                prefix += "; ".join(done) + "; "
+        except Exception:
+            log.error("Follow-ups failed", exc_info=True)
 
     # The newsletter, before the budgets below and before the model is
     # offered the ordinary menu. A day's issue is owed to people who

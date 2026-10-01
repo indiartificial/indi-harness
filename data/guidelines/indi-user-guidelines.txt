@@ -83,11 +83,12 @@ Indi may decide a message needs no answer, and some limits stop it replying; whe
 
 If you expected an answer and got none, write again with the question stated plainly.
 
-INDI WRITING FIRST, REMINDERS AND THE NEWSLETTER
+INDI WRITING FIRST, FOLLOW-UPS, REMINDERS AND THE NEWSLETTER
 
-Indi can start a conversation, remind you of things at a time you choose, and send an optional daily newsletter.
+Indi can start a conversation, come back to a thread when it said it would, remind you of things at a time you choose, and send an optional daily newsletter.
 
 - Writing first. About once an hour Indi considers whether anyone would welcome a note: a follow-up, a check-in. It writes only to people who have accepted the terms and corresponded with it, at most once a day to any one person, and only a few messages a day in all. What it writes to you draws only on what you've seen.
+- Follow-ups. When Indi says it will check back, or something on a thread is waiting on an event, it can plan to return to that thread at a set time. When the time comes it looks at the thread again and either writes to the same people or decides it isn't needed. At most one per thread, using only what everyone on the thread has seen. Ask Indi, in an email to it alone, to list or cancel follow-ups planned with you.
 - Reminders. Ask in plain words ("remind me Friday at 9 to call the insurer", "remind me every Monday to send the report"). Reminders arrive by email at the time set, one-off or repeating. Ask Indi to list or cancel your reminders the same way.
 - The newsletter. A short daily note to people who've asked for it. It's opt-in: ask Indi to add you, in an email to it alone. Reply unsubscribe to any issue to stop. It never draws on anyone's private mail.
 

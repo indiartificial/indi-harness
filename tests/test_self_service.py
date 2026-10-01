@@ -84,3 +84,17 @@ def test_offered_only_on_a_reply_to_the_sender_alone():
         return {t.get("name") for t in tools}
     assert ss.TOOL_NAMES <= names(False)
     assert not ss.TOOL_NAMES & names(True)
+
+
+def test_web_fetch_can_be_offered_to_everyone(monkeypatch):
+    cfg = SimpleNamespace(enable_web_search=False, enable_web_fetch=True,
+                          enable_code_execution=True, enable_history_search=False,
+                          enable_outbound=False, betas=lambda **kw: [],
+                          web_fetch_tool_type="web_fetch_x", max_fetches_per_reply=3,
+                          web_fetch_allowed_domains=(), code_execution_tool_type="code_x")
+    names = lambda trusted: {t["name"] for t in claude_api.build_tools(cfg, trusted, False)[0]}
+    monkeypatch.setenv("INDI_WEB_FETCH_FOR", "trusted")
+    assert "web_fetch" not in names(False) and "web_fetch" in names(True)
+    monkeypatch.setenv("INDI_WEB_FETCH_FOR", "everyone")
+    assert "web_fetch" in names(False)
+    assert "code_execution" not in names(False)          # still trusted-only

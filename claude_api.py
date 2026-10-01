@@ -68,6 +68,7 @@ import agenda
 import attachments
 import costs
 import followups
+import gmail_reads
 import gmail_store
 import outbound
 import self_service
@@ -460,6 +461,13 @@ def build_attachment_blocks(gmail, cfg, msg: dict, client, trusted: bool):
 # THE REQUEST
 # ---------------------------------------------------------------------------
 
+def fetch_for_everyone() -> bool:
+    """INDI_WEB_FETCH_FOR=everyone offers web fetch to every correspondent,
+    as Claude chat does; anything else (the default) keeps it to trusted
+    senders. Code execution stays with trusted senders either way."""
+    return gmail_reads._setting("INDI_WEB_FETCH_FOR").lower() == "everyone"
+
+
 def build_tools(cfg, trusted: bool, have_store: bool,
                 local_runner=None, scope_all_history: bool = False,
                 self_code_runner=None, claude_code_runner=None,
@@ -477,7 +485,7 @@ def build_tools(cfg, trusted: bool, have_store: bool,
             "max_uses": cfg.max_searches_per_reply,
         })
 
-    if cfg.enable_web_fetch and trusted:
+    if cfg.enable_web_fetch and (trusted or fetch_for_everyone()):
         fetch_tool = {
             "type": cfg.web_fetch_tool_type,
             "name": "web_fetch",

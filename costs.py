@@ -41,6 +41,8 @@ log = logging.getLogger("indi.costs")
 # asks for the 1-hour TTL, which is priced at 2x. cache_read is 0.1x
 # input except where a model sets its own rate.
 PRICING: dict[str, dict[str, float]] = {
+    # Opus 5.5 (22 Sep 2026): 20% under Opus 5; cache reads at 5% of input.
+    "claude-opus-5-5":   {"input":  4.00, "output": 20.00, "cache_write":  5.00, "cache_read": 0.20},
     "claude-opus-5":     {"input":  5.00, "output": 25.00, "cache_write":  6.25, "cache_read": 0.50},
     "claude-opus-4-8":   {"input":  5.00, "output": 25.00, "cache_write":  6.25, "cache_read": 0.50},
     "claude-opus-4-7":   {"input":  5.00, "output": 25.00, "cache_write":  6.25, "cache_read": 0.50},

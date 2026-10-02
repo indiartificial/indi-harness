@@ -84,6 +84,8 @@ import alerts
 import audience
 import consult
 import gmail_store
+import followups
+import ledger
 import reply_all
 import local_tools
 import locking
@@ -857,6 +859,13 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
         store.set_attachments(row, stored_paths)
 
     # --- generate -------------------------------------------------------
+    # What is still open on this thread, for the writer (ledger.py).
+    ledger_text = ""
+    if ledger.enabled() and getattr(store, "responses_id", None):
+        try:
+            ledger_text = ledger.render(ledger.open_for(store, msg["thread_id"], recipients))
+        except Exception:
+            log.warning("Could not read the ledger.", exc_info=True)
     try:
         reply_text, stats = claude_api.generate_reply(
             claude, cfg, system_prompt, msg,
@@ -866,6 +875,7 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
             pending_text="" if others else pending,
             recipients=recipients,
             addressed=_addressed(raw_message, selves),
+            ledger_text=ledger_text,
             store=store,
             trusted=trusted,
             scope_all_history=scope_all_history,
@@ -959,6 +969,7 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
                 thread_text and f"THE THREAD:\n{thread_text}",
                 (not others and memory.body) and f"WHAT THEY TOLD INDI BEFORE:\n{memory.body}",
                 (not others and pending) and f"RECENT EXCHANGES WITH THEM:\n{pending}",
+                ledger_text and f"OPEN ON THE THREAD:\n{ledger_text}",
                 stats.get("tool_outputs") and (
                     "WHAT INDI LOOKED UP WHILE WRITING (history searches already "
                     "limited to these recipients, its own source code, files, the "
@@ -1127,6 +1138,21 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
     except Exception:
         log.warning("Could not consolidate memory for %s.", sender,
                     exc_info=True)
+
+    # The ledger's turn: account for what was open, record what's new;
+    # settled entries cancel follow-ups about them, dated commitments get
+    # one (ledger.py, followups.py). Best effort, like everything here.
+    if ledger.enabled() and getattr(store, "responses_id", None):
+        try:
+            changes = ledger.keep(
+                claude, store, msg, clean_body, recipients, reply_id,
+                on_closed=lambda e: followups.cancel_about(
+                    store, e["entry_id"], f"ledger entry {e['status']}"),
+                on_commitment=lambda e: followups.schedule_for_commitment(store, e, msg))
+            if changes:
+                log.info("Ledger: %s", "; ".join(changes))
+        except Exception:
+            log.warning("The ledger step failed.", exc_info=True)
 
     # The broker's turn: now that the reply has gone, is anything the
     # recipients couldn't see worth asking its owner about? (consult.py)

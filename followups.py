@@ -55,7 +55,10 @@ log = logging.getLogger("indi.followups")
 
 TAB = "Follow-ups"
 HEADERS = ["followup_id", "created_at", "due_at", "thread_id", "msg_id", "owner",
-           "recipients", "note", "status", "attempts", "completed_at", "outcome"]
+           "recipients", "note", "status", "attempts", "completed_at", "outcome",
+           # The ledger entry (ledger.py) this follow-up is about, if any: when
+           # that entry is resolved or dropped, the follow-up is cancelled.
+           "about"]
 PENDING, SENT, SKIPPED, CANCELLED, FAILED, REPLACED = (
     "pending", "sent", "skipped", "cancelled", "failed", "replaced")
 
@@ -165,6 +168,10 @@ def schedule_schema(now: datetime.datetime | None = None) -> dict:
                 "note": {"type": "string", "description":
                          "A short note to yourself: what to check and why. Only "
                          "what the people on this thread have seen."},
+                "about": {"type": "string", "description":
+                          "Optional: the id of the open ledger entry ([L-...]) this "
+                          "is about. If that entry is settled first, the follow-up "
+                          "is cancelled."},
             },
             "required": ["due_at", "note"],
         },
@@ -214,8 +221,38 @@ def schedule(store, msg: dict, recipients, payload: dict, now=None) -> tuple[str
         "owner": (msg.get("from_addr") or "").lower(),
         "recipients": ", ".join(sorted({r.lower() for r in recipients if r})),
         "note": note, "status": PENDING, "attempts": "0", "completed_at": "", "outcome": "",
+        "about": (payload.get("about") or "").strip()[:20],
     })
     return f"Follow-up {fid} planned for {due.isoformat()}.", False
+
+
+def cancel_about(store, entry_id: str, why: str) -> int:
+    """Cancel pending follow-ups about a ledger entry that has been closed."""
+    n = 0
+    for r in pending(store):
+        if entry_id and r.get("about") == entry_id:
+            _update(store, r, status=CANCELLED, completed_at=_now().isoformat(), outcome=why[:300])
+            n += 1
+    return n
+
+
+def schedule_for_commitment(store, entry: dict, msg: dict) -> str:
+    """A dated commitment gets a follow-up at its date — unless the thread
+    already has one pending (one per thread; the earlier plan stands)."""
+    thread = entry.get("thread_id", "")
+    if any(r.get("thread_id") == thread for r in pending(store)):
+        return "thread already has a follow-up"
+    due = _parse(entry.get("due_at", ""))
+    if due is None or due < _now() + datetime.timedelta(hours=MIN_HOURS):
+        return "no usable date"
+    text, err = schedule(store, msg, _split_audience(entry.get("audience", "")),
+                         {"due_at": due.isoformat(), "note": f"You committed to: {entry['text']}",
+                          "about": entry["entry_id"]})
+    return text
+
+
+def _split_audience(value: str) -> list[str]:
+    return [a.strip() for a in (value or "").split(",") if a.strip()]
 
 
 def _concerning(store, sender: str) -> list[dict]:

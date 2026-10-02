@@ -75,6 +75,7 @@ PROTECTED_FILES = {
     "self_service.py",   # a sender withdrawing sharing, joining the newsletter
     "alerts.py",         # tells the operator when something fails
     "followups.py",      # what Indi sends when a follow-up comes due
+    "ledger.py",         # what is shown as open and what gets followed up
 }
 
 # data/ holds the Terms of Service themselves and the record of who has

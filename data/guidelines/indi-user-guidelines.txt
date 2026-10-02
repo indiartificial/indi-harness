@@ -48,7 +48,7 @@ Indi answers everyone on the thread, usually within about five minutes, and only
 - Large groups. If more than 10 people would receive the reply, Indi answers the sender alone.
 - Waiting for the terms. If someone on the thread hasn't accepted, Indi sends them the terms and holds its reply. It goes out once everyone has accepted or declined, or after 72 hours to those who accepted.
 - Timing. Indi checks its mail about every five minutes, so replies aren't instant.
-- Format. Replies are plain text, signed by Indi, with your message quoted below the way Gmail quotes it.
+- Format. Replies are signed by Indi, with your message quoted below the way Gmail quotes it. Each comes as plain text with a formatted copy, so paragraphs fit your screen on any phone or mail app.
 
 WHEN INDI ASKS YOUR PERMISSION
 
@@ -81,7 +81,7 @@ Indi may decide a message needs no answer, and some limits stop it replying; whe
 - You haven't accepted the terms yet: the terms.
 - The message came from an automated or no-reply address: nothing, to avoid mail loops.
 
-If you expected an answer and got none, write again with the question stated plainly.
+If something goes wrong on Indi's side, such as a temporary fault, it tries again on later runs, and sends you the note above if it still can't answer. If you expected an answer and got none, write again with the question stated plainly.
 
 INDI WRITING FIRST, FOLLOW-UPS, REMINDERS AND THE NEWSLETTER
 
@@ -94,11 +94,11 @@ Indi can start a conversation, come back to a thread when it said it would, remi
 
 ATTACHMENTS AND THE WEB
 
-Indi reads most attachments you send, can attach files to its replies, and can search the web.
+Indi reads most attachments you send, can attach files to its replies, and can search the web and read web pages.
 
 - Attachments you send: PDFs, images and text files are read along with your message. Very large files (over about 5 MB) are skipped, and Indi will say so.
 - Attachments Indi sends: it can attach a file it has written, such as a draft, a list or a table, when that's more useful than putting it in the email.
-- The web: Indi can search for current information, a few searches per reply. It works from search results, and can't log in to sites or open links behind a password.
+- The web: Indi can search for current information and read web pages and PDFs, a few of each per reply. It can open a link you send it, or one it found by searching, but can't log in to sites or open pages behind a password.
 
 EMERGENCIES, AND WHAT INDI IS NOT
 

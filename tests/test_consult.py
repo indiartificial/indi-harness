@@ -107,7 +107,9 @@ def test_no_private_items_means_no_call():
 def test_revise_rewrites_once_and_checks_again(setup):
     _, store, _ = setup
     items = consult.candidates(store, {ANN})
-    client = Client([_tool("verdict", verdict="revise", reason="'not Wednesday' hints")],
+    client = Client([_tool("verdict", verdict="revise", reason="'not Wednesday' hints",
+                           private_item_id="b-private", draft_quote="Not Wednesday",
+                           private_quote="wednesday impossible")],
                     [_text("How about Thursday?\n— Indi")],
                     [_tool("verdict", verdict="pass", reason="")])
     text, note = consult.vet(client, CFG, "Not Wednesday, Thursday?\n— Indi", {ANN}, items)
@@ -119,9 +121,13 @@ def test_revise_rewrites_once_and_checks_again(setup):
 def test_a_second_failure_blocks(setup):
     _, store, _ = setup
     items = consult.candidates(store, {ANN})
-    client = Client([_tool("verdict", verdict="revise", reason="x")], [_text("still bad")],
-                    [_tool("verdict", verdict="revise", reason="y")])
-    assert consult.vet(client, CFG, "d", {ANN}, items)[0] is None
+    leak = dict(private_item_id="b-private", private_quote="wednesday impossible")
+    client = Client([_tool("verdict", verdict="revise", reason="x", draft_quote="wednesday",
+                           **leak)],
+                    [_text("Still wednesday, sorry.")],
+                    [_tool("verdict", verdict="revise", reason="y", draft_quote="still wednesday",
+                           **leak)])
+    assert consult.vet(client, CFG, "Bob says wednesday is out", {ANN}, items)[0] is None
 
 
 def test_a_check_that_cannot_run_is_reported_not_passed(setup):
@@ -403,3 +409,69 @@ def test_the_question_to_an_owner_is_checked_against_their_own_message(setup, mo
     consult.request(Client(), CFG, mail, store, None, item,
                     "May I tell Ann you can't make Wednesday?", {ANN}, "a-own")
     assert seen and "wednesday impossible" in seen[0] and "THEIR OWN MESSAGE" in seen[0]
+
+
+
+# --------------------------------------------------------------------------
+# objections must be grounded
+# --------------------------------------------------------------------------
+
+def _verdict(**k):
+    return Client([_tool("verdict", verdict="block", reason="r", **k)])
+
+
+def test_a_vague_objection_is_not_enough(setup):
+    _, store, _ = setup
+    items = consult.candidates(store, {ANN})
+    verdict, why = consult.check(_verdict(), CFG, "Thursday works.", {ANN}, items)
+    assert verdict == consult.PASS and "names no private item" in why
+
+
+def test_an_objection_must_quote_both_sides_exactly(setup):
+    _, store, _ = setup
+    items = consult.candidates(store, {ANN})
+    v, why = consult.check(_verdict(private_item_id="b-private", draft_quote="Friday",
+                                    private_quote="wednesday impossible"),
+                           CFG, "Thursday works.", {ANN}, items)
+    assert v == consult.PASS and "isn't in the draft" in why
+    v, why = consult.check(_verdict(private_item_id="b-private", draft_quote="Thursday",
+                                    private_quote="monday is fine"),
+                           CFG, "Thursday works.", {ANN}, items)
+    assert v == consult.PASS and "isn't in the item" in why
+
+
+def test_disagreeing_with_a_private_item_is_not_revealing_it(setup):
+    _, store, _ = setup
+    items = consult.candidates(store, {ANN})
+    v, why = consult.check(_verdict(private_item_id="b-private",
+                                    draft_quote="he hasn't shared his availability",
+                                    private_quote="wednesday impossible"),
+                           CFG, "Sorry, he hasn't shared his availability with me.", {ANN}, items)
+    assert v == consult.PASS and "share nothing" in why
+
+
+def test_words_the_recipient_already_has_dont_count(setup):
+    _, store, _ = setup
+    items = consult.candidates(store, {ANN})
+    v, _ = consult.check(_verdict(private_item_id="b-private", draft_quote="wednesday",
+                                  private_quote="wednesday impossible"),
+                         CFG, "Not wednesday, then.", {ANN}, items,
+                         seen="Ann: wednesday is no good for me either")
+    assert v == consult.PASS
+
+
+def test_a_grounded_objection_stands(setup):
+    _, store, _ = setup
+    items = consult.candidates(store, {ANN})
+    v, _ = consult.check(_verdict(private_item_id="b-private", draft_quote="wednesday is out",
+                                  private_quote="wednesday impossible"),
+                         CFG, "Bob says wednesday is out.", {ANN}, items)
+    assert v == consult.BLOCK
+
+
+def test_the_check_can_use_its_own_model(setup, monkeypatch):
+    _, store, _ = setup
+    monkeypatch.setenv("INDI_CHECK_MODEL", "claude-opus-5-5")
+    client = Client([_tool("verdict", verdict="pass", reason="")])
+    consult.check(client, CFG, "d", {ANN}, consult.candidates(store, {ANN}))
+    assert client.seen[0]["model"] == "claude-opus-5-5"

@@ -138,6 +138,12 @@ def add(store, thread_id: str, audience, kind: str, text: str, due_at: str = "",
 KEEPER_SYSTEM = (
     "You keep a ledger for one email thread: open QUESTIONS (things someone "
     "is waiting to find out) and COMMITMENTS (things Indi said it would do). "
+    "Be sparing. A COMMITMENT is a specific task Indi has to come back and "
+    "do later — send the agenda, check the quote arrived — not a standing "
+    "behaviour or policy (keeping something private, preferring mornings, "
+    "'I'll help when you're ready'). A QUESTION is something a person is "
+    "actually waiting on an answer to, not a general uncertainty. When in "
+    "doubt, record nothing. "
     "You are shown the open entries, the newest message on the thread, and "
     "Indi's reply to it.\n\n"
     "For EVERY open entry, decide: resolved (the message or the reply settles "
@@ -177,16 +183,22 @@ KEEPER_TOOL = {
 }
 
 
+_REFUSES_FORCED: set[str] = set()
+
+
 def _call(client, content: str):
     kwargs = dict(model=model(), max_tokens=1500, tools=[KEEPER_TOOL],
                   messages=[{"role": "user", "content": content}])
     try:
+        if model() in _REFUSES_FORCED:
+            raise RuntimeError("tool_choice: known to refuse")
         response = client.messages.create(
             system=KEEPER_SYSTEM, tool_choice={"type": "tool", "name": KEEPER_TOOL["name"]},
             **kwargs)
     except Exception as exc:
         if "tool_choice" not in str(exc):
             raise
+        _REFUSES_FORCED.add(model())
         response = client.messages.create(
             system=KEEPER_SYSTEM + "\n\nAnswer only by calling update_ledger.",
             tool_choice={"type": "auto"}, **kwargs)

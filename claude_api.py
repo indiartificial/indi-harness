@@ -897,7 +897,8 @@ def generate_reply(client, cfg, system_prompt: str, msg: dict,
                    self_code_runner=None, claude_code_runner=None,
                    thread_text: str = "", quoted_text: str = "",
                    recipients=None, addressed: str = "",
-                   agenda_owner: str = "", ledger_text: str = "") -> tuple[str, dict]:
+                   agenda_owner: str = "", ledger_text: str = "",
+                   shared_text: str = "") -> tuple[str, dict]:
     """Returns (reply_text, stats). stats["set_aside"] is set to the stated
     reason if Indi chose not to reply at all."""
     sender_only = frozenset({(msg.get("from_addr") or "").lower()} - {""})
@@ -922,6 +923,11 @@ def generate_reply(client, cfg, system_prompt: str, msg: dict,
         # to show; it tells Indi who else is in the conversation.
         user_blocks.append({"type": "text",
                             "text": "[How the new message was addressed:]\n" + addressed})
+    if shared_text.strip():
+        user_blocks.append({"type": "text", "text": (
+            "[Other recent mail that everyone this reply goes to has already "
+            "seen. It is theirs to discuss: use it, and answer questions about it.]\n"
+            + shared_text)})
     if ledger_text.strip():
         # What is still open on this thread (ledger.py): questions waiting
         # on an answer, things Indi said it would do.

@@ -288,7 +288,8 @@ def load_system_prompt(cfg: Config, self_address: str) -> str:
         f"{mode}\n"
         f"{initiative}\n"
         "Keep replies to a few short paragraphs unless the sender clearly wants "
-        "more."
+        "more. Don't sign off with your name: your signature is added "
+        "automatically."
     )
     return base + runtime + "\n" + audience.PROMPT
 
@@ -416,6 +417,26 @@ def quoting_enabled() -> bool:
     """INDI_QUOTE_REPLIES, on unless set to false."""
     return (gmail_reads._setting("INDI_QUOTE_REPLIES") or "true").lower() not in (
         "0", "false", "no", "off")
+
+
+SHARED_LOOKBACK = 40       # recent handled messages considered
+SHARED_MAX = 5             # shown
+SHARED_MAX_CHARS = 6000
+
+
+def shared_context(store, recipients, thread_id: str) -> str:
+    """The latest few messages, on other threads, that every recipient of
+    this reply was party to (audience.py), with Indi's replies they saw."""
+    ids = store._handled_ids(limit=SHARED_LOOKBACK)
+    meta = store._meta(ids)
+    cleared = [i for i in store._cleared(ids, recipients)
+               if meta.get(i, {}).get("thread") != thread_id][:SHARED_MAX]
+    if not cleared:
+        return ""
+    rows = store._rows(cleared)
+    replies = store.responses_for(rows, cleared_for=recipients)
+    text = sheets_queue.format_exchanges(rows, replies, max_chars_each=900)
+    return text[-SHARED_MAX_CHARS:]
 
 
 def _addressed(raw: dict, selves) -> str:
@@ -717,7 +738,8 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
 
     log.info("Sender is %s; history scope: %s.",
              "trusted (full toolset)" if trusted else "untrusted (restricted toolset)",
-             "all correspondents" if scope_all_history else "own thread only")
+             "all mail, unrestricted" if scope_all_history
+             else "what everyone on the reply has seen")
 
     # Local machine access is a second, narrower permission. A sender must
     # be on INDI_LOCAL_TOOLS_SENDERS *and* be trusted; see
@@ -827,6 +849,16 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
         log.info("Thread context: %d earlier message(s), %d chars.",
                  thread_count, len(thread_text))
 
+    # Recent mail on other threads that everyone on this reply has already
+    # seen — theirs to discuss — put in front of the writer, so it doesn't
+    # have to think to search for it, and doesn't mistake it for private.
+    shared_text = ""
+    if getattr(store, "supports_audience", False):
+        try:
+            shared_text = shared_context(store, recipients, msg["thread_id"])
+        except Exception:
+            log.warning("Could not gather shared recent mail.", exc_info=True)
+
     # The un-folded exchanges are a second rendering of the same recent
     # history. Where the thread already carries a message verbatim, the
     # summary copy is pure duplication: paid for twice, and two slightly
@@ -878,6 +910,7 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
             recipients=recipients,
             addressed=_addressed(raw_message, selves),
             ledger_text=ledger_text,
+            shared_text=shared_text,
             store=store,
             trusted=trusted,
             scope_all_history=scope_all_history,
@@ -972,6 +1005,7 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
                 (not others and memory.body) and f"WHAT THEY TOLD INDI BEFORE:\n{memory.body}",
                 (not others and pending) and f"RECENT EXCHANGES WITH THEM:\n{pending}",
                 ledger_text and f"OPEN ON THE THREAD:\n{ledger_text}",
+                shared_text and f"OTHER MAIL THEY HAVE ALL SEEN:\n{shared_text}",
                 stats.get("tool_outputs") and (
                     "WHAT INDI LOOKED UP WHILE WRITING (history searches already "
                     "limited to these recipients, its own source code, files, the "

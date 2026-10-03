@@ -140,6 +140,11 @@ class CheckUnavailable(Exception):
     the draft as blocked for good."""
 
 
+# Models that have refused a forced tool choice this run: asked directly
+# after the first refusal instead of paying for a failed call each time.
+_REFUSES_FORCED: set[str] = set()
+
+
 def check_model(cfg) -> str:
     """INDI_CHECK_MODEL for the pre-send check — a wrong block costs someone
     their whole reply, so it can be set stronger than the other
@@ -158,12 +163,17 @@ def _tool_call(client, cfg, system: str, content: str, tool: dict, kind: str,
     kwargs = dict(model=model, max_tokens=1500, tools=[tool],
                   messages=[{"role": "user", "content": content}])
     try:
+        if model in _REFUSES_FORCED:
+            raise RuntimeError("tool_choice: known to refuse")
         response = client.messages.create(
             system=system, tool_choice={"type": "tool", "name": tool["name"]}, **kwargs)
     except Exception as exc:
         if "tool_choice" not in str(exc):
             raise
-        log.info("Model %s refuses a forced tool choice; asking instead.", model)
+        if model not in _REFUSES_FORCED:
+            log.info("Model %s refuses a forced tool choice; asking instead from now on.",
+                     model)
+            _REFUSES_FORCED.add(model)
         response = client.messages.create(
             system=system + f"\n\nAnswer only by calling the {tool['name']} tool.",
             tool_choice={"type": "auto"}, **kwargs)

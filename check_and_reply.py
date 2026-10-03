@@ -1358,6 +1358,8 @@ def main() -> int:
                 expired = consult.expire(store)
                 if expired:
                     log.info("%d consultation(s) expired unanswered.", expired)
+                for line in consult.retry_followups(claude, cfg, gmail, store, selves):
+                    log.info("Consultation: %s", line)
             except Exception:
                 log.warning("Could not expire consultations.", exc_info=True)
 

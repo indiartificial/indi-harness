@@ -475,3 +475,70 @@ def test_the_check_can_use_its_own_model(setup, monkeypatch):
     client = Client([_tool("verdict", verdict="pass", reason="")])
     consult.check(client, CFG, "d", {ANN}, consult.candidates(store, {ANN}))
     assert client.seen[0]["model"] == "claude-opus-5-5"
+
+
+# --------------------------------------------------------------------------
+# a yes with a condition
+# --------------------------------------------------------------------------
+
+def test_a_conditional_yes_is_a_yes_with_its_condition():
+    client = Client([_text('{"answer": "yes", "condition": "don\'t mention the reason"}')])
+    assert consult.classify(client, CFG, "Yes, but don't mention the reason.") == (
+        "YES", "don't mention the reason")
+    assert consult.classify(Client([_text("NO")]), CFG, "No.") == ("NO", "")
+    assert consult.classify(Client([_text("hmm?")]), CFG, "What for?")[0] == "UNCLEAR"
+
+
+def test_the_condition_travels_with_the_grant_and_shapes_the_follow_up(setup, monkeypatch):
+    g, store, mail = setup
+    monkeypatch.setattr(gmail_io, "sender_is_authenticated", lambda m: (True, ""))
+    row = _open(store)
+    client = Client(
+        [_text('{"answer": "yes", "condition": "not the reason"}')],          # classify
+        [_text("Bob can't do Wednesday.\n— Indi")],                           # follow-up draft
+        [_tool("verdict", verdict="pass", reason="")],                        # pre-send check
+        [_tool("condition_verdict", breaks=False)])                           # condition check
+    out = consult.handle_answer(client, CFG, mail, store, None, _answer("Yes, not the reason"),
+                                row, {INDI})
+    assert "on condition (not the reason)" in out and "follow-up sent" in out
+    [g1] = store.grants().active()
+    assert "condition: not the reason" in g1.note
+    assert "ON THIS CONDITION" in client.seen[1]["system"]
+
+
+def test_a_follow_up_breaking_the_condition_is_rewritten_or_held(setup):
+    _, store, _ = setup
+    row = {"item_id": "b-private"}
+    client = Client([_tool("condition_verdict", breaks=True, draft_quote="family",
+                           reason="names the reason")],
+                    [_text("Bob can't do Wednesday.")],
+                    [_tool("condition_verdict", breaks=False)])
+    text, note = consult.keeps_condition(client, CFG, "Bob can't do Wednesday (family).",
+                                         "not the reason", row, store)
+    assert text == "Bob can't do Wednesday." and "rewritten" in note
+    client = Client([_tool("condition_verdict", breaks=True, draft_quote="family")],
+                    [_text("Still family.")],
+                    [_tool("condition_verdict", breaks=True, draft_quote="family")])
+    assert consult.keeps_condition(client, CFG, "family stuff", "not the reason", row,
+                                   store)[0] is None
+
+
+def test_a_check_answered_in_prose_is_retried_then_read_as_json(setup):
+    _, store, _ = setup
+    consult._REFUSES_FORCED.add("m")
+    client = Client([_text("I think it passes.")],
+                    [_text('Here you go: {"verdict": "pass", "reason": "fine"}')])
+    out = consult._tool_call(client, CFG, "s", "c", consult.CHECK_TOOL, "check", model="m")
+    assert out == {"verdict": "pass", "reason": "fine"} and len(client.seen) == 2
+    consult._REFUSES_FORCED.discard("m")
+
+
+def test_a_follow_up_the_check_couldnt_vet_is_retried_later(setup, monkeypatch):
+    g, store, mail = setup
+    row = _open(store)
+    consult._update(store, row, status=consult.GRANTED, followup="retry: check unavailable")
+    calls = []
+    monkeypatch.setattr(consult, "follow_up", lambda *a: calls.append(1) or "follow-up sent")
+    assert consult.retry_followups(Client(), CFG, mail, store, {INDI}) == [
+        "consultation c-1: follow-up sent"]
+    assert consult.retry_followups(Client(), CFG, mail, store, {INDI}) == []

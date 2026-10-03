@@ -114,6 +114,7 @@ class Grant:
     evidence: str
     revoked_at: str
     row: int = -1
+    note: str = ""              # e.g. the owner's condition, in their words
 
     @property
     def active(self) -> bool:
@@ -148,7 +149,8 @@ class GrantBook:
                 to=(r.get("to") or "").strip().lower(),
                 granted_at=r.get("granted_at", ""), evidence=r.get("evidence", ""),
                 revoked_at=(r.get("revoked_at") or "").strip(),
-                row=r.get("_row", -1)) for r in raw if (r.get("owner") or "").strip()]
+                row=r.get("_row", -1), note=(r.get("note") or "").strip())
+                for r in raw if (r.get("owner") or "").strip()]
         return list(self._rows)
 
     def active(self) -> list[Grant]:
@@ -174,7 +176,8 @@ class GrantBook:
         row = self.store._append(self.store.responses_id, GRANTS_TAB, GRANTS_HEADERS, record)
         self._rows = None
         return Grant(record["grant_id"], owner, record["scope"], to,
-                     record["granted_at"], evidence, "", row if isinstance(row, int) else -1)
+                     record["granted_at"], evidence, "", row if isinstance(row, int) else -1,
+                     record["note"])
 
     def revoke(self, grant_id: str) -> bool:
         """Fill in `revoked_at` on the grant's own row; the row stays."""

@@ -100,8 +100,11 @@ def _list(store, sender: str) -> str:
     lines = []
     for g in mine:
         state = f"withdrawn {g.revoked_at[:10]}" if g.revoked_at else "active"
+        cond = ""
+        if "condition:" in g.note:
+            cond = "; on condition: " + g.note.split("condition:", 1)[1].strip()
         lines.append(f"{g.grant_id}: {_describe_scope(store, g)} may be shown to "
-                     f"{g.to} (given {g.granted_at[:10]}; {state})")
+                     f"{g.to} (given {g.granted_at[:10]}; {state}{cond})")
     return "\n".join(lines)
 
 

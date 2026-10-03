@@ -65,3 +65,14 @@ def test_a_refusing_model_is_asked_directly_after_the_first_time(monkeypatch):
     for _ in range(3):
         assert consult._tool_call(client, cfg, "s", "c", tool, "check", model="m-refuses") == {"ok": 1}
     assert calls == ["tool", "auto", "auto", "auto"]
+
+
+def test_indi_is_told_not_to_claim_what_it_wasnt_told():
+    assert "never claim that someone hasn't said" in audience.PROMPT
+
+
+def test_the_consultation_cap_can_be_raised(monkeypatch):
+    monkeypatch.delenv("INDI_CONSULT_PER_OWNER_PER_DAY", raising=False)
+    assert consult.per_owner_per_day() == consult.MAX_PER_OWNER_PER_DAY
+    monkeypatch.setenv("INDI_CONSULT_PER_OWNER_PER_DAY", "20")
+    assert consult.per_owner_per_day() == 20

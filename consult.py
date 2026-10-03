@@ -145,6 +145,17 @@ class CheckUnavailable(Exception):
 _REFUSES_FORCED: set[str] = set()
 
 
+def per_owner_per_day() -> int:
+    """INDI_CONSULT_PER_OWNER_PER_DAY, default MAX_PER_OWNER_PER_DAY: how
+    many consultation emails one person may get a day. Raise it while
+    testing; keep it low for real people."""
+    try:
+        return max(0, int(gmail_reads._setting("INDI_CONSULT_PER_OWNER_PER_DAY")
+                          or MAX_PER_OWNER_PER_DAY))
+    except ValueError:
+        return MAX_PER_OWNER_PER_DAY
+
+
 def check_model(cfg) -> str:
     """INDI_CHECK_MODEL for the pre-send check — a wrong block costs someone
     their whole reply, so it can be set stronger than the other
@@ -413,7 +424,7 @@ def allowed(store, owner: str, item_id: str, to: set[str]) -> tuple[bool, str]:
         return False, "too many open consultations"
     today = [r for r in rows if r.get("owner") == owner
              and _since(r) < datetime.timedelta(days=1)]
-    if len(today) >= MAX_PER_OWNER_PER_DAY:
+    if len(today) >= per_owner_per_day():
         return False, "owner already asked enough today"
     to_key = ", ".join(sorted(to))
     for r in rows:

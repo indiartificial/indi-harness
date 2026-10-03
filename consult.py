@@ -437,8 +437,12 @@ def request(client, cfg, gmail, store, people, item: dict, question: str,
     if not ok:
         return f"not asking {owner}: {why}"
     try:
+        # The owner wrote the message being asked about: tell the check, or
+        # it takes the owner's own words for someone else's secret.
         text, note = vet(client, cfg, question, {owner}, [
-            r for r in candidates(store, {owner}) if r["gmail_msg_id"] != item["gmail_msg_id"]])
+            r for r in candidates(store, {owner}) if r["gmail_msg_id"] != item["gmail_msg_id"]],
+            seen=f"THEIR OWN MESSAGE, WHICH THIS QUESTION IS ABOUT:\n"
+                 f"Subject: {item.get('subject', '')}\n{item.get('body', '')}")
     except CheckUnavailable as exc:
         return f"not asking {owner}: the check could not run ({str(exc)[:120]})"
     if text is None:

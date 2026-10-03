@@ -391,3 +391,15 @@ def test_a_reply_to_the_operator_alone_is_not_checked(tmp_path, people, reply, m
     gmail = FakeGmail()
     _go(gmail, _cfg(tmp_path), ReplyStore(), people)
     assert len(gmail.sent) == 1
+
+
+def test_the_question_to_an_owner_is_checked_against_their_own_message(setup, monkeypatch):
+    g, store, mail = setup
+    seen = []
+    monkeypatch.setattr(consult, "vet", lambda client, cfg, draft, r, items, seen_="", **k:
+                        seen.append(k.get("seen", seen_)) or (draft, "ok"))
+    item = {"gmail_msg_id": "b-private", "owner": BOB, "subject": "plans",
+            "body": "plans wednesday impossible"}
+    consult.request(Client(), CFG, mail, store, None, item,
+                    "May I tell Ann you can't make Wednesday?", {ANN}, "a-own")
+    assert seen and "wednesday impossible" in seen[0] and "THEIR OWN MESSAGE" in seen[0]

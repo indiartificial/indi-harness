@@ -265,11 +265,13 @@ def load_system_prompt(cfg: Config, self_address: str) -> str:
             "It can repeat on an interval, within bounds the tool describes, "
             "and list_reminders and cancel_reminder let that person see and "
             "stop their own — nobody else's.\n"
-            "That is the whole of it. Promise a follow-up only when you have "
-            "just scheduled it with the tool and the tool said it worked. "
-            "Never promise to check back on something, watch for something, or "
-            "send something separately — outside a scheduled reminder you have "
-            "no way to do any of that."
+            "You can also plan to come back to a thread yourself with "
+            "schedule_follow_up, when it is offered.\n"
+            "That is the whole of it. Promise a reminder or a follow-up only "
+            "when you have just scheduled it with the tool and the tool said it "
+            "worked. Never promise to check back on something, watch for "
+            "something, or send something separately otherwise — you have no "
+            "way to do it."
         )
     else:
         initiative = (
@@ -288,7 +290,7 @@ def load_system_prompt(cfg: Config, self_address: str) -> str:
         "Keep replies to a few short paragraphs unless the sender clearly wants "
         "more."
     )
-    return base + runtime
+    return base + runtime + "\n" + audience.PROMPT
 
 
 # ---------------------------------------------------------------------------

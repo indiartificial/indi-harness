@@ -1249,7 +1249,7 @@ def main() -> int:
     if clock.virtual():
         log.warning("VIRTUAL CLOCK (staging): it is %s here, %s in reality.",
                     clock.now().isoformat(timespec="minutes"),
-                    datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="minutes"))
+                    clock._real().isoformat(timespec="minutes"))
     # Counts this run's ERROR lines for the end-of-run alert (alerts.py).
     monitor = alerts.RunMonitor()
     logging.getLogger().addHandler(monitor)

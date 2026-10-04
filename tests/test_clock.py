@@ -82,3 +82,29 @@ def test_money_stays_on_real_time(clockfile, monkeypatch):
     clock.set_virtual(JAN7)
     stamp = datetime.datetime.fromisoformat(costs._now_iso())
     assert abs((stamp - datetime.datetime.now(datetime.timezone.utc)).total_seconds()) < 5
+
+
+def test_a_staging_run_starts_on_the_virtual_clock(clockfile, monkeypatch, tmp_path, caplog):
+    """The start-of-run warning names both times (and must not crash)."""
+    import logging
+    monkeypatch.setenv("INDI_STAGING", "true")
+    clock.set_virtual(JAN7)
+    reached = {}
+
+    class Stop(Exception):
+        pass
+
+    def fake_from_env(**k):
+        return SimpleNamespace(log_path=tmp_path / "log.txt", lock_path=tmp_path / "lock",
+                               dry_run=False)
+    monkeypatch.setattr(check_and_reply.Config, "from_env", staticmethod(fake_from_env))
+    monkeypatch.setattr(check_and_reply, "setup_logging", lambda *a: None)
+
+    def stop(*a, **k):
+        reached["lock"] = True
+        raise Stop()
+    monkeypatch.setattr(check_and_reply, "acquire_lock", stop)
+    monkeypatch.setattr(sys, "argv", ["check_and_reply.py", "--non-interactive"])
+    with caplog.at_level(logging.WARNING, logger="indi"), pytest.raises(Stop):
+        check_and_reply.main()
+    assert reached and "VIRTUAL CLOCK" in caplog.text and "2027-01-07" in caplog.text

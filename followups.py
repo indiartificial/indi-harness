@@ -58,7 +58,9 @@ HEADERS = ["followup_id", "created_at", "due_at", "thread_id", "msg_id", "owner"
            "recipients", "note", "status", "attempts", "completed_at", "outcome",
            # The ledger entry (ledger.py) this follow-up is about, if any: when
            # that entry is resolved or dropped, the follow-up is cancelled.
-           "about"]
+           "about",
+           # How many times Indi has put it off ("not yet"), at most MAX_POSTPONES.
+           "postponed"]
 PENDING, SENT, SKIPPED, CANCELLED, FAILED, REPLACED = (
     "pending", "sent", "skipped", "cancelled", "failed", "replaced")
 
@@ -67,6 +69,8 @@ LIST_TOOL = "list_follow_ups"
 CANCEL_TOOL = "cancel_follow_up"
 SEND_TOOL = "send_follow_up"
 SKIP_TOOL = "skip_follow_up"
+POSTPONE_TOOL = "postpone_follow_up"
+MAX_POSTPONES = 2
 REPLY_TOOL_NAMES = {SCHEDULE_TOOL, LIST_TOOL, CANCEL_TOOL}
 
 MIN_HOURS = 1
@@ -296,20 +300,28 @@ def handle_reply_tool(store, msg: dict, recipients, name: str, payload: dict,
 FIRE_SUFFIX = """
 
 --- A FOLLOW-UP YOU PLANNED ---
-On {created} you decided to come back to this thread around now. Your note
-to yourself: {note}
+On {created} you decided to come back to this thread around now. It is now
+{now} UTC. Your note to yourself: {note}
 
 Below is the thread as it stands, showing only what everyone it would go to
-({recipients}) has already seen. Look at it fresh. If a follow-up is still
-useful, call send_follow_up with the message: plain text, short, as yourself,
-written for all of them. If it isn't — it has been dealt with, someone
-already answered, the moment has passed — call skip_follow_up with the
-reason. Call exactly one tool. Don't promise further follow-ups."""
+({recipients}) has already seen. Look at it fresh, and call exactly one tool:
+- send_follow_up, with the message (plain text, short, as yourself, written
+  for all of them, no sign-off) if a follow-up is useful now;
+- postpone_follow_up, with a later time and the reason, if it's too early —
+  what you're waiting on can't have happened yet ({postpones_left} postponement(s)
+  left);
+- skip_follow_up, with the reason, if it isn't needed — it has been dealt
+  with, someone already answered, the moment has passed.
+Don't promise further follow-ups."""
 
 FIRE_TOOLS = [
     {"name": SEND_TOOL, "description": "Send the follow-up in the thread.",
      "input_schema": {"type": "object", "properties": {"body": {"type": "string"}},
                       "required": ["body"]}},
+    {"name": POSTPONE_TOOL, "description": "Too early: look again at a later time.",
+     "input_schema": {"type": "object", "properties": {
+         "due_at": {"type": "string", "description": "ISO 8601 with an offset."},
+         "reason": {"type": "string"}}, "required": ["due_at", "reason"]}},
     {"name": SKIP_TOOL, "description": "Don't send; say why.",
      "input_schema": {"type": "object", "properties": {"reason": {"type": "string"}},
                       "required": ["reason"]}},
@@ -354,14 +366,17 @@ def _thread_view(gmail, store, row: dict, selves) -> tuple[str, dict | None]:
 def _decide(client, cfg, model: str, system_prompt: str, row: dict, view: str):
     response = client.messages.create(
         model=model, max_tokens=min(getattr(cfg, "max_tokens", 4000), 4000),
-        system=system_prompt + FIRE_SUFFIX.format(created=row.get("created_at", "")[:16],
-                                                  note=row.get("note", ""),
-                                                  recipients=row.get("recipients", "")),
+        system=system_prompt + FIRE_SUFFIX.format(
+            created=row.get("created_at", "")[:16], note=row.get("note", ""),
+            recipients=row.get("recipients", ""),
+            now=_now().strftime("%A %d %B %Y, %H:%M"),
+            postpones_left=max(0, MAX_POSTPONES - int(row.get("postponed") or 0))),
         tools=FIRE_TOOLS,
         messages=[{"role": "user", "content": f"THE THREAD:\n{view}"}])
     costs.record("followup", model, costs.tokens_from_usage(getattr(response, "usage", None)))
     for b in response.content:
-        if getattr(b, "type", "") == "tool_use" and b.name in (SEND_TOOL, SKIP_TOOL):
+        if getattr(b, "type", "") == "tool_use" and b.name in (SEND_TOOL, SKIP_TOOL,
+                                                                POSTPONE_TOOL):
             return b.name, b.input
     return None, {}
 
@@ -394,6 +409,25 @@ def run_due(client, cfg, gmail, store, system_prompt: str, selves, people,
                 continue
             choice, data = _decide(client, cfg, model, system_prompt,
                                    {**row, "recipients": ", ".join(recipients)}, view)
+            if choice == POSTPONE_TOOL:
+                reason = (data.get("reason") or "").strip()[:300]
+                later = _parse(data.get("due_at", ""))
+                done = int(row.get("postponed") or 0)
+                created = _parse(row.get("created_at", "")) or now
+                if (later is not None and done < MAX_POSTPONES
+                        and later >= now + datetime.timedelta(hours=MIN_HOURS)
+                        - datetime.timedelta(minutes=5)
+                        and later <= created + datetime.timedelta(days=MAX_DAYS)):
+                    _update(store, row, due_at=later.astimezone(datetime.timezone.utc).isoformat(),
+                            postponed=str(done + 1), attempts="0",
+                            outcome=f"postponed: {reason}")
+                    outcomes.append(f"follow-up {fid} postponed to {later.isoformat()[:16]}: "
+                                    f"{reason[:60]}")
+                    continue
+                choice, data = SKIP_TOOL, {"reason": "wanted to postpone again, but "
+                                           + ("it has been put off twice already"
+                                              if done >= MAX_POSTPONES else "the new time "
+                                              "wasn't usable") + f" ({reason[:120]})"}
             if choice != SEND_TOOL:
                 reason = (data.get("reason") or "no decision").strip()[:300]
                 _update(store, row, status=SKIPPED, completed_at=now.isoformat(), outcome=reason)

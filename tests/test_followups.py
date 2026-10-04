@@ -177,3 +177,57 @@ def test_offered_on_any_reply_but_list_and_cancel_only_solo():
         cfg, False, True, reminder_sender=ANN, shared_reply=shared)[0]}
     assert fu.REPLY_TOOL_NAMES <= names(False)
     assert fu.SCHEDULE_TOOL in names(True) and fu.LIST_TOOL not in names(True)
+
+
+# --------------------------------------------------------------------------
+# postponing
+# --------------------------------------------------------------------------
+
+def test_too_early_can_be_postponed_and_comes_due_again(setup):
+    _, store, mail = setup
+    _plan(store)
+    later = (NOW + datetime.timedelta(days=3)).isoformat()
+    out = _run(store, mail, Client([_tool(fu.POSTPONE_TOOL, due_at=later,
+                                          reason="Friday hasn't come yet")]))
+    assert "postponed" in out[0] and mail.sent == []
+    [row] = fu.pending(store)
+    assert row["postponed"] == "1" and row["due_at"].startswith((NOW + datetime.timedelta(days=3)).isoformat()[:10])
+    assert "postponed: Friday hasn't come yet" == row["outcome"]
+    # Not due yet a day later; due after the new time.
+    assert _run(store, mail, Client(), hours=48) == []
+    out = _run(store, mail, Client([_tool(fu.SEND_TOOL, body="Did the caterer confirm?")]),
+               hours=24 * 3 + 1)
+    assert out[0].endswith(" sent")
+
+
+def test_postponing_is_limited(setup):
+    _, store, mail = setup
+    _plan(store)
+    hours = 25
+    for i in range(2):
+        later = (NOW + datetime.timedelta(hours=hours + 24)).isoformat()
+        _run(store, mail, Client([_tool(fu.POSTPONE_TOOL, due_at=later, reason="not yet")]),
+             hours=hours)
+        hours += 25
+    out = _run(store, mail, Client([_tool(fu.POSTPONE_TOOL, due_at=(NOW + datetime.timedelta(
+        hours=hours + 24)).isoformat(), reason="still not yet")]), hours=hours)
+    assert "skipped" in out[0] and "twice already" in out[0] + fu._rows(store)[-1]["outcome"]
+    assert fu.pending(store) == []
+
+
+def test_a_postponement_needs_a_usable_time(setup):
+    _, store, mail = setup
+    _plan(store)
+    out = _run(store, mail, Client([_tool(fu.POSTPONE_TOOL, due_at="soonish", reason="x")]))
+    assert "skipped" in out[0] and fu.pending(store) == []
+
+
+def test_indi_is_told_the_time_and_its_options(setup):
+    _, store, mail = setup
+    _plan(store)
+    client = Client([_tool(fu.SKIP_TOOL, reason="done")])
+    _run(store, mail, client)
+    system = client.seen[0]["system"]
+    assert "It is now" in system and "postpone_follow_up" in system and "2 postponement" in system
+    assert {t["name"] for t in client.seen[0]["tools"]} == {fu.SEND_TOOL, fu.SKIP_TOOL,
+                                                           fu.POSTPONE_TOOL}

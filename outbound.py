@@ -143,6 +143,7 @@ from __future__ import annotations
 
 import calendar
 import datetime
+import clock
 import logging
 import os
 import uuid
@@ -433,7 +434,7 @@ Call exactly one tool. If nothing needs doing, call do_nothing."""
 # ---------------------------------------------------------------------------
 
 def _now() -> datetime.datetime:
-    return datetime.datetime.now(datetime.timezone.utc)
+    return clock.now()
 
 
 def parse_when(value: str) -> datetime.datetime | None:

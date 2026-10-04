@@ -76,6 +76,7 @@ PROTECTED_FILES = {
     "alerts.py",         # tells the operator when something fails
     "followups.py",      # what Indi sends when a follow-up comes due
     "ledger.py",         # what is shown as open and what gets followed up
+    "clock.py",          # the time Indi believes it is (staging only)
 }
 
 # data/ holds the Terms of Service themselves and the record of who has

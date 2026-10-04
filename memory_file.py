@@ -52,6 +52,7 @@ once, into the equivalent id set, and the next consolidation writes v2.
 from __future__ import annotations
 
 import datetime
+import clock
 import io
 import logging
 import re
@@ -107,7 +108,7 @@ code fences, no commentary."""
 
 
 def _now_iso() -> str:
-    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+    return clock.now().isoformat()
 
 
 def _slug(sender_addr: str) -> str:
@@ -129,7 +130,7 @@ def backup_name_prefix(sender_addr: str) -> str:
 
 
 def timestamped_backup_name(sender_addr: str, when=None) -> str:
-    stamp = (when or datetime.datetime.now(datetime.timezone.utc)).strftime(
+    stamp = (when or clock.now()).strftime(
         "%Y%m%d-%H%M%S"
     )
     return f"{backup_name_prefix(sender_addr)}{stamp})"

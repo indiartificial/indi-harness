@@ -43,6 +43,7 @@ self-modification.
 from __future__ import annotations
 
 import datetime
+import clock
 import logging
 import uuid
 
@@ -83,7 +84,7 @@ DEFAULT_PER_DAY = 5
 
 
 def _now() -> datetime.datetime:
-    return datetime.datetime.now(datetime.timezone.utc)
+    return clock.now()
 
 
 def enabled() -> bool:

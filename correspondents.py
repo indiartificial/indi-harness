@@ -31,6 +31,7 @@ Status values, and what the gate does with each, are in `terms_gate.py`:
 from __future__ import annotations
 
 import datetime
+import clock
 import logging
 import os
 import sqlite3
@@ -68,7 +69,7 @@ log = logging.getLogger("indi.correspondents")
 
 
 def _now_iso() -> str:
-    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+    return clock.now().isoformat()
 
 
 def normalise_address(address: str) -> str:

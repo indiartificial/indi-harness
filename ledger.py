@@ -35,6 +35,7 @@ and what gets followed up, so it is protected from self-modification.
 from __future__ import annotations
 
 import datetime
+import clock
 import logging
 import uuid
 
@@ -64,7 +65,7 @@ def model() -> str:
 
 
 def _now() -> datetime.datetime:
-    return datetime.datetime.now(datetime.timezone.utc)
+    return clock.now()
 
 
 def _split(value: str) -> set[str]:

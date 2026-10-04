@@ -51,6 +51,7 @@ What changed and why:
 from __future__ import annotations
 
 import datetime
+import clock
 import logging
 import re
 
@@ -145,7 +146,7 @@ _HEADER_CELL = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_ .\-]{0,63}$")
 
 def _now_iso() -> str:
     # datetime.utcnow() is deprecated in 3.12+ and returns a naive value.
-    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+    return clock.now().isoformat()
 
 
 def _escape_drive_query(value: str) -> str:
@@ -640,6 +641,7 @@ class SheetStore:
         return rows[-n:] if n > 0 else []
 
     def replies_in_last_day(self, sender_addr: str) -> int:
+        # Real time: compared with Gmail-era reply timestamps (see clock.py).
         now = datetime.datetime.now(datetime.timezone.utc)
         cutoff = now - datetime.timedelta(days=1)
         count = 0
@@ -764,7 +766,7 @@ def _outbound_methods():
 
     def _count_since(self, rows: list[dict], hours: int, field: str = "",
                      value: str = "") -> int:
-        cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=hours)
+        cutoff = clock.now() - datetime.timedelta(hours=hours)
         count = 0
         for row in rows:
             if field and row.get(field, "").lower() != value.lower():

@@ -28,3 +28,6 @@ data/check_attempts.json
 # Alert rate-limiting state (alerts.py).
 data/alert_state.json
 data/alert_state.tmp
+
+# The staging copy's virtual clock (clock.py).
+data/virtual_clock.json

@@ -81,6 +81,7 @@ import gmail_io
 import gmail_reads
 import drive_tables
 import alerts
+import clock
 import audience
 import consult
 import gmail_store
@@ -237,7 +238,7 @@ def load_system_prompt(cfg: Config, self_address: str) -> str:
             "concisely, in plain text with no markdown."
         )
 
-    today = datetime.datetime.now().astimezone()
+    today = clock.now(None)
     mode = (
         "This reply will be SENT IMMEDIATELY to the recipient without any human "
         "review. Write accordingly: be careful, and say plainly when you are "
@@ -1245,6 +1246,10 @@ def main() -> int:
     args = parse_args()
     cfg = Config.from_env(dry_run=args.dry_run, non_interactive=args.non_interactive)
     setup_logging(cfg.log_path, args.verbose)
+    if clock.virtual():
+        log.warning("VIRTUAL CLOCK (staging): it is %s here, %s in reality.",
+                    clock.now().isoformat(timespec="minutes"),
+                    datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="minutes"))
     # Counts this run's ERROR lines for the end-of-run alert (alerts.py).
     monitor = alerts.RunMonitor()
     logging.getLogger().addHandler(monitor)

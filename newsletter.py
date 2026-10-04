@@ -90,6 +90,7 @@ accepted the terms is not receiving the newsletter to begin with.
 from __future__ import annotations
 
 import datetime
+import clock
 import hashlib
 import logging
 
@@ -167,7 +168,7 @@ UNSUBSCRIBE_ACK = (
 
 
 def _now() -> datetime.datetime:
-    return datetime.datetime.now(datetime.timezone.utc)
+    return clock.now()
 
 
 def _now_iso() -> str:

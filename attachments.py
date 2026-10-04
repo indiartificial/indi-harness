@@ -63,6 +63,7 @@ gitignored: it is other people's files.
 from __future__ import annotations
 
 import datetime
+import clock
 import json
 import logging
 import os
@@ -99,7 +100,7 @@ TOOL_NAMES = {LIST_TOOL, READ_TOOL}
 
 
 def _now_iso() -> str:
-    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+    return clock.now().isoformat()
 
 
 @dataclass(frozen=True)

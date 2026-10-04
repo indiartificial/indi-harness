@@ -48,6 +48,7 @@ self-modification.
 from __future__ import annotations
 
 import datetime
+import clock
 import logging
 from email.utils import getaddresses
 
@@ -93,7 +94,7 @@ def enabled(cfg=None) -> bool:
 
 
 def _now() -> datetime.datetime:
-    return datetime.datetime.now(datetime.timezone.utc)
+    return clock.now()
 
 
 def _looks_automated(addr: str) -> bool:

@@ -53,6 +53,7 @@ self-modification.
 from __future__ import annotations
 
 import datetime
+import clock
 import json
 import logging
 import uuid
@@ -99,7 +100,7 @@ def model_for(cfg) -> str:
 
 
 def _now() -> datetime.datetime:
-    return datetime.datetime.now(datetime.timezone.utc)
+    return clock.now()
 
 
 # ---------------------------------------------------------------------------

@@ -64,6 +64,7 @@ there is one writer at a time, as with every other tab.
 from __future__ import annotations
 
 import datetime
+import clock
 import logging
 import uuid
 
@@ -101,7 +102,7 @@ MAX_SHOWN = 20
 
 
 def _now() -> datetime.datetime:
-    return datetime.datetime.now(datetime.timezone.utc)
+    return clock.now()
 
 
 def _parse_when(value: str) -> datetime.datetime | None:

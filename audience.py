@@ -45,6 +45,7 @@ self-modification like the terms gate.
 from __future__ import annotations
 
 import datetime
+import clock
 import logging
 import uuid
 from dataclasses import dataclass
@@ -169,7 +170,7 @@ class GrantBook:
         record = {
             "grant_id": f"g-{uuid.uuid4().hex[:10]}", "owner": owner,
             "scope": scope or ALL_ITEMS, "to": to,
-            "granted_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "granted_at": clock.now().isoformat(),
             "evidence": evidence, "revoked_at": "", "note": note[:300],
         }
         self._table_ready()
@@ -185,7 +186,7 @@ class GrantBook:
         for g in self.all():
             if g.grant_id == grant_id and g.active and g.row > 0:
                 col = _col_letter(GRANTS_HEADERS.index("revoked_at"))
-                now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                now = clock.now().isoformat()
                 self.store.sheets.spreadsheets().values().update(
                     spreadsheetId=self.store.responses_id,
                     range=f"{GRANTS_TAB}!{col}{g.row}:{col}{g.row}",

@@ -81,7 +81,7 @@ PAPER_BODY = (
     "If you don't answer within {hours} hours, Indi will reply to the others "
     "without you. Nothing you have written is read or kept until you "
     "accept.\n\n"
-    "— Indi\n"
+    "--- Indi\n"
 )
 
 

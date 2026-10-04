@@ -542,3 +542,21 @@ def test_a_follow_up_the_check_couldnt_vet_is_retried_later(setup, monkeypatch):
     assert consult.retry_followups(Client(), CFG, mail, store, {INDI}) == [
         "consultation c-1: follow-up sent"]
     assert consult.retry_followups(Client(), CFG, mail, store, {INDI}) == []
+
+
+def test_the_asker_may_be_named_but_others_stay_private(setup, monkeypatch):
+    _, store, mail = setup
+    shown = []
+    monkeypatch.setattr(consult, "vet", lambda client, cfg, draft, r, items, **k:
+                        shown.append({i["gmail_msg_id"] for i in items}) or (draft, "ok"))
+    item = {"gmail_msg_id": "b-private", "owner": BOB, "subject": "plans",
+            "body": "plans wednesday impossible"}
+    all_private = {i["gmail_msg_id"] for i in consult.candidates(store, {BOB})}
+    assert "a-own" in all_private
+    consult.request(Client(), CFG, mail, store, None, item,
+                    "May I tell Ann you can't make Wednesday?", {ANN}, "a-own")
+    assert shown and "a-own" not in shown[0] and shown[0] == all_private - {"a-own", "b-private"}
+
+
+def test_the_broker_must_name_who_would_be_told():
+    assert "by name — always" in consult.BROKER_SYSTEM

@@ -605,3 +605,10 @@ def test_the_broker_says_what_it_decided_and_uses_the_check_model(setup, monkeyp
         assert consult.broker(client, CFG, msg, {ANN}, consult.candidates(store, {ANN}), None) == []
     assert client.seen[0]["model"] == "strong-model"
     assert "asked nobody" in caplog.text and "considered" in caplog.text
+
+
+def test_a_no_with_a_counter_proposal_is_asked_about_again():
+    assert "counter-proposal" in consult.ANSWER_SYSTEM
+    client = Client([_text('{"answer": "unclear", "condition": ""}')])
+    assert consult.classify(client, CFG, "No. Tell Ann and Carol I have an outside offer.")[0] \
+        == "UNCLEAR"

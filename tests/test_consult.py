@@ -618,3 +618,20 @@ def test_an_echoed_subject_line_is_dropped_from_the_question():
     client = Client([_text("Subject: Re: plans\n\nHi Bob, may I tell Ann?")])
     q = consult.draft_question(client, CFG, {"subject": "plans", "body": "b"}, {ANN}, "planning")
     assert q.startswith("Hi Bob") and "Subject:" not in q
+
+
+def test_the_follow_up_is_about_what_was_agreed_and_goes_to_the_whole_thread(setup, monkeypatch):
+    import base64
+    from email import message_from_bytes
+    g, store, mail = setup
+    monkeypatch.setattr(gmail_io, "sender_is_authenticated", lambda m: (True, ""))
+    row = _open(store)
+    consult._update(store, row, asker_msg_id="b-shared")        # Bob was on that thread
+    client = Client([_text('{"answer": "yes", "condition": ""}')],
+                    [_text("Bob can't make Wednesday next week.")],
+                    [_tool("verdict", verdict="pass", reason="")])
+    consult.handle_answer(client, CFG, mail, store, None, _answer(), row, {INDI})
+    prompt = client.seen[1]["messages"][0]["content"]
+    assert "WHAT YOU MAY NOW SHARE" in prompt and "wednesday impossible" in prompt
+    sent = message_from_bytes(base64.urlsafe_b64decode(mail.sent[-1]["raw"]))
+    assert BOB in (sent["To"] or "") + (sent["Cc"] or "") and ANN in (sent["To"] or "") + (sent["Cc"] or "")

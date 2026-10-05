@@ -774,12 +774,14 @@ def handle_answer(client, cfg, gmail, store, people, msg: dict, row: dict,
 # ---------------------------------------------------------------------------
 
 FOLLOWUP_SYSTEM = (
-    "You are Indi. Earlier you replied to the people below. Since then, "
-    "something relevant has become yours to share with them; it is in the "
-    "context. Write a short follow-up that adds it, framed as something new "
-    "you can now add. Don't say anyone was asked, and don't apologise for "
-    "the earlier reply. If on reflection it adds nothing useful, reply with "
-    "exactly NOTHING. Plain text, signed \"--- Indi\"."
+    "You are Indi. Earlier you replied to the people below. Since then, the "
+    "person who told you something privately has agreed that you may share "
+    "it with them; it is shown as WHAT YOU MAY NOW SHARE. Write a short "
+    "follow-up whose point is to pass that on, in your own words, framed as "
+    "something you can now add. Keep to it: no new analysis, no restating your "
+    "earlier reply. Don't say anyone was asked, and don't apologise. If it "
+    "truly adds nothing they don't already know, reply with exactly NOTHING. "
+    "Plain text, no sign-off (one is added)."
 )
 
 
@@ -794,24 +796,40 @@ def follow_up(client, cfg, gmail, store, row: dict, selves) -> str:
     except Exception:
         return "no follow-up: the original message is gone"
     msg = gmail_io.extract_message(original, cfg.max_body_chars)
+    # The thread the follow-up goes back to: everyone the original message
+    # was between, the owner included if they were on it — they know what
+    # they agreed to, and leaving them off their own thread is odd.
+    owner = (row.get("owner") or "").lower()
+    hdrs = gmail_reads._headers(original)
+    on_thread = {a.lower() for a in audience.addrs(hdrs.get("to", "")) |
+                 audience.addrs(hdrs.get("cc", "")) | {msg.get("from_addr", "")}} \
+        - {s.lower() for s in (selves or ())}
+    everyone = sorted(set(to) | ({owner} & on_thread))
     context = outbound._context_for(cfg, store, set(to))
     condition = (row.get("note") or "").split("condition:", 1)[1].strip() \
         if "condition:" in (row.get("note") or "") else ""
+    item = next(iter(store._rows([row["item_id"]])), {}) if hasattr(store, "_rows") else {}
     system = FOLLOWUP_SYSTEM + (
-        f"\n\nThe owner agreed to share ON THIS CONDITION, in their words: "
-        f"\"{condition}\". Honour it strictly: leave out anything it excludes, "
-        f"even if it is in the context." if condition else "")
-    model = model_for(cfg)
+        f"\n\nThe owner agreed ON THIS CONDITION, in their words: \"{condition}\". "
+        f"Honour it strictly: leave out anything it excludes." if condition else "")
+    sharing = (f"WHAT YOU MAY NOW SHARE (from {owner}'s message"
+               + (f", on the condition above" if condition else "") + "):\n"
+               + f"Subject: {item.get('subject', '')}\n{(item.get('body') or '')[:3000]}")
+    # The stronger model: this message is the whole point of having asked.
+    model = check_model(cfg)
     response = client.messages.create(
         model=model, max_tokens=2000, system=system,
         messages=[{"role": "user", "content":
-                   f"TO: {', '.join(to)}\n\nTHEIR MESSAGE:\n{msg.get('body', '')[:3000]}"
-                   f"\n\nWHAT THEY MAY SEE NOW:\n{context}"}])
+                   f"TO: {', '.join(everyone)}\n\n{sharing}\n\n"
+                   f"THE MESSAGE YOU ARE FOLLOWING UP:\n{msg.get('body', '')[:3000]}"
+                   f"\n\nOTHER BACKGROUND THEY HAVE SEEN:\n{context[:4000]}"}])
     costs.record("followup", model, costs.tokens_from_usage(getattr(response, "usage", None)))
     draft = "".join(b.text for b in response.content
                     if getattr(b, "type", "") == "text").strip()
     if not draft or draft.upper() == "NOTHING":
         return "no follow-up: nothing to add"
+    if "--- Indi" not in draft:
+        draft = draft.rstrip() + "\n\n--- Indi"
     try:
         text, note = vet(client, cfg, draft, set(to), candidates(store, set(to)),
                          seen=f"{msg.get('body', '')}\n\n{context}")
@@ -822,7 +840,7 @@ def follow_up(client, cfg, gmail, store, row: dict, selves) -> str:
     if text is None:
         return f"no follow-up: blocked by the check ({note[:120]})"
     sender = msg.get("from_addr", "").lower()
-    others = [a for a in to if a != sender]
+    others = [a for a in everyone if a != sender]
     mime = gmail_io.build_reply_mime(
         to_addr=msg.get("reply_to_raw") or msg.get("from_raw", ""),
         subject=msg.get("subject", ""), body=text,

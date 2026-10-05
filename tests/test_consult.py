@@ -178,20 +178,22 @@ def test_the_broker_asks_the_owner_and_records_it(setup):
     g, store, mail = setup
     client = Client(
         [_tool("consultations", requests=[
-            {"item_id": "b-private", "question": "May I tell Ann you can't do Wednesday?"},
-            {"item_id": "made-up", "question": "?"}])],
+            {"item_id": "b-private", "purpose": "scheduling",
+             "question": "words the selector writes are ignored"},
+            {"item_id": "made-up", "purpose": "scheduling"}])],
+        [_text("May I tell ann@example.com that you can't make Wednesday?")],
         [_tool("verdict", verdict="pass", reason="")])
     msg = {"gmail_msg_id": "a-own", "from_addr": ANN, "subject": "plans", "body": "when?"}
     out = consult.after_reply(client, CFG, mail, store, None, msg, {ANN})
     assert len(out) == 1 and out[0].startswith(f"asked {BOB}")
     [row] = consult.open_rows(store)
     assert row["owner"] == BOB and row["item_id"] == "b-private" and row["to"] == ANN
-    assert b"[consult c-" in __import__("base64").urlsafe_b64decode(mail.sent[0]["raw"])
+    raw = __import__("base64").urlsafe_b64decode(mail.sent[0]["raw"])
+    assert b"[consult c-" in raw and b"ignored" not in raw
     # The same question is not asked twice.
     again = consult.request(client, CFG, mail, store, None,
-                            {"gmail_msg_id": "b-private", "owner": BOB}, "q", {ANN}, "x")
+                            {"gmail_msg_id": "b-private", "owner": BOB}, "scheduling", {ANN}, "x")
     assert "already asked" in again
-
 
 def test_owners_who_cannot_be_written_to_are_not_offered(setup, monkeypatch):
     _, store, _ = setup
@@ -402,19 +404,14 @@ def test_a_reply_to_the_operator_alone_is_not_checked(tmp_path, people, reply, m
 def test_the_question_to_an_owner_is_checked_against_their_own_message(setup, monkeypatch):
     g, store, mail = setup
     seen = []
+    monkeypatch.setattr(consult, "draft_question", lambda *a: "May I tell Ann?\n\n--- Indi")
     monkeypatch.setattr(consult, "vet", lambda client, cfg, draft, r, items, seen_="", **k:
                         seen.append(k.get("seen", seen_)) or (draft, "ok"))
     item = {"gmail_msg_id": "b-private", "owner": BOB, "subject": "plans",
             "body": "plans wednesday impossible"}
-    consult.request(Client(), CFG, mail, store, None, item,
-                    "May I tell Ann you can't make Wednesday?", {ANN}, "a-own")
+    consult.request(Client(), CFG, mail, store, None, item, "scheduling", {ANN}, "a-own")
     assert seen and "wednesday impossible" in seen[0] and "THEIR OWN MESSAGE" in seen[0]
-
-
-
-# --------------------------------------------------------------------------
-# objections must be grounded
-# --------------------------------------------------------------------------
+    assert ANN in seen[0]                                   # naming who'd be told is allowed
 
 def _verdict(**k):
     return Client([_tool("verdict", verdict="block", reason="r", **k)])
@@ -546,17 +543,53 @@ def test_a_follow_up_the_check_couldnt_vet_is_retried_later(setup, monkeypatch):
 
 def test_the_asker_may_be_named_but_others_stay_private(setup, monkeypatch):
     _, store, mail = setup
-    shown = []
+    shown, strictness = [], []
+    monkeypatch.setattr(consult, "draft_question", lambda *a: "May I tell Ann?\n\n--- Indi")
     monkeypatch.setattr(consult, "vet", lambda client, cfg, draft, r, items, **k:
-                        shown.append({i["gmail_msg_id"] for i in items}) or (draft, "ok"))
+                        shown.append({i["gmail_msg_id"] for i in items})
+                        or strictness.append(k.get("strict")) or (draft, "ok"))
     item = {"gmail_msg_id": "b-private", "owner": BOB, "subject": "plans",
             "body": "plans wednesday impossible"}
     all_private = {i["gmail_msg_id"] for i in consult.candidates(store, {BOB})}
     assert "a-own" in all_private
-    consult.request(Client(), CFG, mail, store, None, item,
-                    "May I tell Ann you can't make Wednesday?", {ANN}, "a-own")
+    consult.request(Client(), CFG, mail, store, None, item, "scheduling", {ANN}, "a-own")
     assert shown and "a-own" not in shown[0] and shown[0] == all_private - {"a-own", "b-private"}
+    assert strictness == [True]
+
+def test_the_drafter_names_who_would_be_told_and_sees_only_the_owners_message(setup):
+    _, store, mail = setup
+    assert "name the people" in consult.DRAFT_SYSTEM
+    client = Client([_text("May I tell ann@example.com you can't do Wednesday?")])
+    item = {"gmail_msg_id": "b-private", "owner": BOB, "subject": "plans",
+            "body": "plans wednesday impossible"}
+    q = consult.draft_question(client, CFG, item, {ANN}, "scheduling")
+    assert q.endswith("--- Indi")
+    shown = client.seen[0]["messages"][0]["content"]
+    assert "wednesday impossible" in shown and ANN in shown and "scheduling" in shown
+    # Nothing else private is in front of the drafter.
+    others = [r for r in consult.candidates(store, {BOB}) if r["gmail_msg_id"] != "b-private"]
+    assert all((r.get("body") or "x")[:20] not in shown for r in others)
 
 
-def test_the_broker_must_name_who_would_be_told():
-    assert "by name — always" in consult.BROKER_SYSTEM
+
+def test_the_selector_writes_no_words():
+    props = consult.SELECT_TOOL["input_schema"]["properties"]["requests"]["items"]["properties"]
+    assert set(props) == {"item_id", "purpose"}
+
+
+def test_a_question_to_an_owner_is_held_on_any_objection(setup):
+    _, store, _ = setup
+    items = consult.candidates(store, {ANN})
+    # An ungrounded objection: overruled for an ordinary reply, decisive here.
+    ordinary = consult.check(Client([_tool("verdict", verdict="block", reason="paraphrase")]),
+                             CFG, "Bob has an outside offer.", {ANN}, items)
+    strict = consult.check(Client([_tool("verdict", verdict="block", reason="paraphrase")]),
+                           CFG, "Bob has an outside offer.", {ANN}, items, strict=True)
+    assert ordinary[0] == consult.PASS and strict[0] == consult.BLOCK
+
+
+def test_never_share_with_the_owner_themselves(setup):
+    _, store, mail = setup
+    item = {"gmail_msg_id": "b-private", "owner": BOB, "subject": "s", "body": "b"}
+    assert "nobody else" in consult.request(Client(), CFG, mail, store, None, item,
+                                            "planning", {BOB}, "x")

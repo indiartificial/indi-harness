@@ -612,3 +612,9 @@ def test_a_no_with_a_counter_proposal_is_asked_about_again():
     client = Client([_text('{"answer": "unclear", "condition": ""}')])
     assert consult.classify(client, CFG, "No. Tell Ann and Carol I have an outside offer.")[0] \
         == "UNCLEAR"
+
+
+def test_an_echoed_subject_line_is_dropped_from_the_question():
+    client = Client([_text("Subject: Re: plans\n\nHi Bob, may I tell Ann?")])
+    q = consult.draft_question(client, CFG, {"subject": "plans", "body": "b"}, {ANN}, "planning")
+    assert q.startswith("Hi Bob") and "Subject:" not in q

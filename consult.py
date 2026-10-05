@@ -559,6 +559,12 @@ def draft_question(client, cfg, item: dict, to: set[str], purpose: str) -> str:
     costs.record("broker", model, costs.tokens_from_usage(getattr(response, "usage", None)))
     text = "".join(getattr(b, "text", "") for b in response.content
                    if getattr(b, "type", "") == "text").strip()
+    # The drafter is shown "Subject: …" and sometimes echoes it as a first
+    # line; the email has its own subject.
+    lines = text.splitlines()
+    while lines and (not lines[0].strip() or lines[0].lower().startswith("subject:")):
+        lines.pop(0)
+    text = "\n".join(lines).strip()
     return (text + "\n\n--- Indi") if text else ""
 
 

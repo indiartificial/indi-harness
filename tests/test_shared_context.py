@@ -117,3 +117,7 @@ def test_no_second_message_to_someone_who_just_got_a_follow_up(monkeypatch):
     client = Client([_call(outbound.SEND_TOOL, to=ANN, subject="s", body="b", rationale="r")])
     out = outbound.run_heartbeat(client, CFG, None, store, "sys", {"indi@example.org"})
     assert "a follow-up just went" in out
+
+
+def test_indi_is_told_not_to_claim_ignorance_about_people():
+    assert "I don't know what's on his mind" in audience.PROMPT

@@ -81,6 +81,7 @@ import gmail_io
 import gmail_reads
 import drive_tables
 import alerts
+import staging
 import clock
 import audience
 import consult
@@ -1261,7 +1262,7 @@ def main() -> int:
     people = None
     try:
         creds = get_credentials(cfg)
-        gmail = build("gmail", "v1", credentials=creds, cache_discovery=False)
+        gmail = staging.guard(build("gmail", "v1", credentials=creds, cache_discovery=False))
         drive = build("drive", "v3", credentials=creds, cache_discovery=False)
         sheets = build("sheets", "v4", credentials=creds, cache_discovery=False)
         claude = anthropic.Anthropic(api_key=cfg.api_key)

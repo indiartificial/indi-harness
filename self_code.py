@@ -77,6 +77,7 @@ PROTECTED_FILES = {
     "followups.py",      # what Indi sends when a follow-up comes due
     "ledger.py",         # what is shown as open and what gets followed up
     "clock.py",          # the time Indi believes it is (staging only)
+    "staging.py",        # a staging copy sends only to test accounts
 }
 
 # data/ holds the Terms of Service themselves and the record of who has

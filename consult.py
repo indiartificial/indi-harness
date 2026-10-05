@@ -566,7 +566,10 @@ def broker(client, cfg, msg: dict, recipients, items: list[dict], people) -> lis
                f"{msg.get('subject', '')!r}:\n<message>\n{msg.get('body', '')[:4000]}\n"
                f"</message>\n\nREPLY WENT TO: {', '.join(sorted(recipients))}\n\n"
                f"PRIVATE ITEMS:\n{_render(askable)}")
-    out = _tool_call(client, cfg, SELECT_SYSTEM, content, SELECT_TOOL, "broker") or {}
+    # The check model: deciding whether something is worth asking about is
+    # the one judgement this step makes, and it is one short call.
+    out = _tool_call(client, cfg, SELECT_SYSTEM, content, SELECT_TOOL, "broker",
+                     model=check_model(cfg)) or {}
     by_id = {r["gmail_msg_id"]: r for r in askable}
     picked = []
     for req in (out.get("requests") or [])[:MAX_OWNERS_PER_ITEM]:
@@ -574,6 +577,11 @@ def broker(client, cfg, msg: dict, recipients, items: list[dict], people) -> lis
         purpose = req.get("purpose") if req.get("purpose") in PURPOSES else PURPOSES[-1]
         if item:
             picked.append({"item": item, "purpose": purpose})
+    # A silent "no" looks like a failure; say what was decided.
+    log.info("Broker: considered %d private message(s) from %s; %s.", len(askable),
+             ", ".join(sorted({r["owner"] for r in askable})),
+             ("will ask " + ", ".join(f"{p['item']['owner']} ({p['purpose']})" for p in picked))
+             if picked else "asked nobody")
     return picked
 
 

@@ -1361,6 +1361,10 @@ def run_heartbeat(client, cfg, gmail, store, system_prompt: str,
     # it did before this existed.
     try:
         owed, why = newsletter.due(cfg, store, people)
+        if owed and clock.staging():
+            # A staging copy writes only to test accounts; its subscriber list
+            # starts with the real operator. No newsletter there.
+            owed, why = False, "staging copy: no newsletter"
         if owed:
             log.info("Newsletter: %s", why)
             # Written for everyone on the list, so drawn only from what

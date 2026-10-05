@@ -593,3 +593,15 @@ def test_never_share_with_the_owner_themselves(setup):
     item = {"gmail_msg_id": "b-private", "owner": BOB, "subject": "s", "body": "b"}
     assert "nobody else" in consult.request(Client(), CFG, mail, store, None, item,
                                             "planning", {BOB}, "x")
+
+
+def test_the_broker_says_what_it_decided_and_uses_the_check_model(setup, monkeypatch, caplog):
+    import logging
+    _, store, _ = setup
+    monkeypatch.setenv("INDI_CHECK_MODEL", "strong-model")
+    client = Client([_tool("consultations", requests=[])])
+    msg = {"gmail_msg_id": "a-own", "from_addr": ANN, "subject": "s", "body": "b"}
+    with caplog.at_level(logging.INFO, logger="indi.consult"):
+        assert consult.broker(client, CFG, msg, {ANN}, consult.candidates(store, {ANN}), None) == []
+    assert client.seen[0]["model"] == "strong-model"
+    assert "asked nobody" in caplog.text and "considered" in caplog.text

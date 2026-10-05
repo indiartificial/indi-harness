@@ -55,9 +55,9 @@ WHEN INDI ASKS YOUR PERMISSION
 If something you told Indi would clearly help someone who didn't see it, Indi may email you to ask whether it can share it with them.
 
 - What you'll get: a message titled "[consult c-...] May I share something you told me?", saying what would be shared and with whom.
-- How to answer: reply in that thread, from the address you originally wrote from, with a plain yes or no. An unclear answer gets one follow-up question, then counts as no.
+- How to answer: reply in that thread, from the address you originally wrote from, with yes, no, or yes with a condition. An unclear answer gets one follow-up question, then counts as no.
 - Silence is a no. With no answer in 72 hours, nothing is shared.
-- What a yes covers: only the one message you were asked about, only with the people named, and it lasts until you withdraw it. Withdrawing stops future use; it can't recall what was already sent. To see what you've agreed to share, or to withdraw a permission, ask Indi in an email to it alone ("what have I let you share?", "stop sharing my messages with Ann", "withdraw all my permissions").
+- What a yes covers: the one message you were asked about, all of it except anything you ask Indi to leave out, only with the people named, and it lasts until you withdraw it. So if you're happy to share part of it, say yes and name what to keep back ("yes, but don't mention the salary"). Withdrawing stops future use; it can't recall what was already sent. To see what you've agreed to share, or to withdraw a permission, ask Indi in an email to it alone ("what have I let you share?", "stop sharing my messages with Ann", "withdraw all my permissions").
 - The other person is never told that you were asked, or that you said no.
 - Indi asks sparingly, and never about health, money, relationships or anything said in confidence.
 

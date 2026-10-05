@@ -474,6 +474,11 @@ def _checked(client, cfg, store, body: str, recipients: set[str], seen: str):
     return text
 
 
+# Who has had a follow-up from this process: the heartbeat's own
+# initiative step mustn't write to them again in the same run.
+SENT_THIS_RUN: set[str] = set()
+
+
 def _send(cfg, gmail, store, row: dict, recipients: list[str], latest: dict | None,
           body: str) -> None:
     owner = row["owner"]
@@ -490,6 +495,7 @@ def _send(cfg, gmail, store, row: dict, recipients: list[str], latest: dict | No
     mime = gmail_io.build_reply_mime(to_addr=owner, subject=subject, body=text,
                                      in_reply_to=in_reply_to, references=references, cc=others)
     mime["threadId"] = row["thread_id"]
+    SENT_THIS_RUN.update(a.lower() for a in recipients)
     if cfg.send_automatically:
         result = gmail.users().messages().send(userId="me", body=mime).execute() or {}
         sent_id = result.get("id", "")

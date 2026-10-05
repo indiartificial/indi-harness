@@ -426,9 +426,14 @@ SHARED_MAX = 5             # shown
 SHARED_MAX_CHARS = 6000
 
 
-def shared_context(store, recipients, thread_id: str) -> str:
+SHARED_ATTACHMENT_CHARS = 3000
+
+
+def shared_context(store, recipients, thread_id: str, cfg=None) -> str:
     """The latest few messages, on other threads, that every recipient of
-    this reply was party to (audience.py), with Indi's replies they saw."""
+    this reply was party to (audience.py), with Indi's replies they saw —
+    and the text of any attachments on them, which everyone on those
+    messages received too."""
     ids = store._handled_ids(limit=SHARED_LOOKBACK)
     meta = store._meta(ids)
     cleared = [i for i in store._cleared(ids, recipients)
@@ -438,7 +443,31 @@ def shared_context(store, recipients, thread_id: str) -> str:
     rows = store._rows(cleared)
     replies = store.responses_for(rows, cleared_for=recipients)
     text = sheets_queue.format_exchanges(rows, replies, max_chars_each=900)
-    return text[-SHARED_MAX_CHARS:]
+    extra = _attachment_text(cfg, cleared) if cfg is not None else ""
+    return text[-SHARED_MAX_CHARS:] + (f"\n\n{extra}" if extra else "")
+
+
+def _attachment_text(cfg, message_ids) -> str:
+    """Text attachments stored for these messages (attachments.py)."""
+    import attachments
+    out = []
+    try:
+        base = attachments.root(cfg)
+    except Exception:
+        return ""
+    for mid in message_ids:
+        folder = base / attachments.safe_component(mid, "unknown-message")
+        if not folder.is_dir():
+            continue
+        for f in sorted(folder.iterdir()):
+            if f.suffix.lower() not in (".txt", ".csv", ".md", ".tsv", ".json"):
+                continue
+            try:
+                body = f.read_text(errors="replace")[:SHARED_ATTACHMENT_CHARS]
+            except OSError:
+                continue
+            out.append(f"[Attachment on that message: {f.name}]\n{body}")
+    return "\n\n".join(out)
 
 
 def _addressed(raw: dict, selves) -> str:
@@ -857,7 +886,7 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
     shared_text = ""
     if getattr(store, "supports_audience", False):
         try:
-            shared_text = shared_context(store, recipients, msg["thread_id"])
+            shared_text = shared_context(store, recipients, msg["thread_id"], cfg)
         except Exception:
             log.warning("Could not gather shared recent mail.", exc_info=True)
 

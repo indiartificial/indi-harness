@@ -1343,6 +1343,7 @@ def run_heartbeat(client, cfg, gmail, store, system_prompt: str,
     # Follow-ups Indi planned for itself (followups.py) that are now due:
     # each is put in front of the model, which must send or skip. Their own
     # daily budget; not the initiative budget below.
+    followups.SENT_THIS_RUN.clear()
     if followups.enabled():
         try:
             done = followups.run_due(client, cfg, gmail, store, system_prompt,
@@ -1477,6 +1478,9 @@ def run_heartbeat(client, cfg, gmail, store, system_prompt: str,
         chosen = (call.input.get("to") or call.input.get("recipient") or "").strip().lower()
         if not chosen:
             return prefix + "no recipient given; skipped"
+        if call.name == SEND_TOOL and chosen in followups.SENT_THIS_RUN:
+            # The follow-up that just went to them already said it.
+            return prefix + f"not writing to {chosen} again: a follow-up just went"
         call = _compose_for(client, cfg, store, system_prompt, model, call.name,
                             chosen, budget_note)
         if call is None:

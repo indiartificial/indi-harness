@@ -29,3 +29,13 @@ def plain_text_mail_unless_asked(monkeypatch):
     capture. Replies now also carry an HTML copy (gmail_io.text_to_html);
     those tests run with it off, and test_html_email.py turns it on."""
     monkeypatch.setenv("INDI_HTML_EMAIL", "false")
+
+
+@pytest.fixture(autouse=True)
+def no_operator_approval_unless_asked(monkeypatch, tmp_path):
+    """Most tests predate operator approval of newcomers (approvals.py) and
+    expect the terms to go straight out; test_approvals.py turns it on.
+    Decisions never touch the real data/approvals.json."""
+    monkeypatch.setenv("INDI_APPROVE_NEW_CORRESPONDENTS", "false")
+    import approvals
+    monkeypatch.setattr(approvals, "FILE", tmp_path / "approvals.json")

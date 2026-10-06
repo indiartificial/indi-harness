@@ -443,6 +443,13 @@ def check_inbound(cfg, gmail, client, msg: dict, people) -> GateDecision:
                  sender)
         return GateDecision(False, "declined — acknowledged once, then silence")
 
+    # Someone who was never sent the terms can't accept them by writing
+    # I AGREE out of the blue while the operator's approval is required.
+    import approvals
+    if command == "agree" and record.terms_sent_count == 0 \
+            and approvals.needs_approval(sender):
+        command = ""
+
     if command == "agree":
         version = current.version if current else record.terms_version_sent
         if not version:
@@ -482,6 +489,8 @@ def check_inbound(cfg, gmail, client, msg: dict, people) -> GateDecision:
     # --- the ordinary path ----------------------------------------------
     if record.status == correspondents.STATUS_DECLINED:
         return GateDecision(False, "declined — no reply")
+    if approvals.denied(sender):
+        return GateDecision(False, "not approved by the operator — no reply")
 
     if record.has_accepted:
         if record.accepted_current_version(current.version if current else ""):
@@ -510,12 +519,24 @@ def check_inbound(cfg, gmail, client, msg: dict, people) -> GateDecision:
         return GateDecision(False, "terms already sent twice without agreement "
                                    "— silent until they agree")
 
+    # Nobody new is sent the terms until the operator approves them
+    # (approvals.py).
+    if record.terms_sent_count == 0 and approvals.needs_approval(sender):
+        return GateDecision(False, approvals.request(cfg, gmail, sender, "direct", msg))
+
+    return GateDecision(False, send_first_terms(cfg, gmail, people, msg))
+
+
+def send_first_terms(cfg, gmail, people, msg: dict) -> str:
+    """Send the sender of `msg` the covering note and the terms."""
+    current = terms.load()
+    if current is None:
+        return "terms unavailable — nothing sent"
+    sender = correspondents.normalise_address(msg.get("from_addr", ""))
+    record = people.get(sender)
     _send_fixed(cfg, gmail, msg, COVERING_NOTE, _terms_attachment(current))
     people.record_terms_sent(sender, current.version)
     first = record.status == correspondents.STATUS_UNKNOWN
     log.info("Sent terms v%s to %s (%s).", current.version, sender,
              "first contact" if first else "second and final copy")
-    return GateDecision(
-        False,
-        f"terms v{current.version} sent ({'first contact' if first else 'resent'})",
-    )
+    return f"terms v{current.version} sent ({'first contact' if first else 'resent'})"

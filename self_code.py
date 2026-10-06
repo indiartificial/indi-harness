@@ -78,6 +78,7 @@ PROTECTED_FILES = {
     "ledger.py",         # what is shown as open and what gets followed up
     "clock.py",          # the time Indi believes it is (staging only)
     "staging.py",        # a staging copy sends only to test accounts
+    "approvals.py",      # the operator approves newcomers before any terms go out
 }
 
 # data/ holds the Terms of Service themselves and the record of who has

@@ -119,6 +119,8 @@ def recipients_for(raw_message: dict, msg: dict, selves, people,
             continue
         if people is not None and people.get(addr).status == correspondents.STATUS_DECLINED:
             continue
+        if __import__("approvals").denied(addr):
+            continue
         others.append(addr)
     if len(others) + 1 > MAX_RECIPIENTS:
         log.info("Reply would go to %d people; answering the sender only.",
@@ -132,17 +134,27 @@ def accepted(addr: str, people) -> bool:
 
 
 def undecided(addrs, people) -> list[str]:
-    """Those who have neither accepted nor declined."""
+    """Those who have neither accepted nor declined (nor been turned away
+    by the operator)."""
+    import approvals
     return [a for a in addrs
             if not accepted(a, people)
-            and people.get(a).status != correspondents.STATUS_DECLINED]
+            and people.get(a).status != correspondents.STATUS_DECLINED
+            and not approvals.denied(a)]
 
 
 # -- papering -------------------------------------------------------------
 
 def paper(cfg, gmail, people, addr: str, msg: dict) -> str:
-    """Send one person the terms, as a message of their own."""
+    """Send one person the terms, as a message of their own — once the
+    operator has approved them (approvals.py)."""
+    import approvals
     record = people.get(addr)
+    if record.terms_sent_count == 0 and approvals.needs_approval(addr):
+        if approvals.denied(addr):
+            return "denied by the operator"
+        return approvals.request(cfg, gmail, addr, "copied", msg,
+                                 by=msg.get("from_addr", ""))
     if record.terms_sent_count >= MAX_TERMS_SENDS:
         return "terms already sent twice"
     current = terms.load()

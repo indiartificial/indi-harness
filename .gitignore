@@ -31,3 +31,7 @@ data/alert_state.tmp
 
 # The staging copy's virtual clock (clock.py).
 data/virtual_clock.json
+
+# Operator decisions on newcomers (approvals.py).
+data/approvals.json
+data/approvals.tmp

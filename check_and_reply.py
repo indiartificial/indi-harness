@@ -81,6 +81,7 @@ import gmail_io
 import gmail_reads
 import drive_tables
 import alerts
+import approvals
 import staging
 import clock
 import audience
@@ -598,6 +599,20 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
         if not cfg.dry_run:
             mark_as_read(gmail, msg["gmail_msg_id"])
         return "already handled"
+
+    # --- the operator approving or turning away a newcomer (approvals.py) -
+    newcomer = approvals.match(msg) if approvals.enabled() else ""
+    if newcomer:
+        outcome = approvals.handle(cfg, gmail, people, msg, newcomer)
+        log.info("Approval: %s", outcome)
+        if cfg.dry_run:
+            return outcome
+        if existing:
+            store.set_status(existing, sheets_queue.STATUS_SKIPPED, outcome)
+        else:
+            store.append_queue_row(msg, sheets_queue.STATUS_SKIPPED, outcome)
+        mark_as_read(gmail, msg["gmail_msg_id"])
+        return outcome
 
     # --- an answer to a consultation (consult.py) -----------------------
     # Mail in a thread Indi started to ask someone's permission is their

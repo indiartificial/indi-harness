@@ -291,6 +291,12 @@ class Config:
     # rather than by how much unsolicited mail Indi may start.
     newsletter_hour_utc: int
     newsletter_max_subscribers: int
+    # Research for the issue. Search needs INDI_ENABLE_WEB_SEARCH as well;
+    # fetch opens only links that came up in the issue run's own searches.
+    newsletter_web_search: bool
+    newsletter_max_searches: int
+    newsletter_web_fetch: bool
+    newsletter_max_fetches: int
 
     # --- self-modification ---
     enable_self_code: bool
@@ -414,6 +420,10 @@ class Config:
             heartbeat_journal_entries=_int("INDI_HEARTBEAT_JOURNAL_ENTRIES", 10),
             newsletter_hour_utc=_int("INDI_NEWSLETTER_HOUR_UTC", 13),
             newsletter_max_subscribers=_int("INDI_NEWSLETTER_MAX_SUBSCRIBERS", 50),
+            newsletter_web_search=_bool("INDI_NEWSLETTER_WEB_SEARCH", True),
+            newsletter_max_searches=_int("INDI_NEWSLETTER_MAX_SEARCHES", 5),
+            newsletter_web_fetch=_bool("INDI_NEWSLETTER_WEB_FETCH", False),
+            newsletter_max_fetches=_int("INDI_NEWSLETTER_MAX_FETCHES", 3),
             enable_self_code=_bool("INDI_ENABLE_SELF_CODE", True),
             self_code_senders=_csv("INDI_SELF_CODE_SENDERS"),
             self_code_auto_apply=_bool("INDI_SELF_CODE_AUTO_APPLY", True),

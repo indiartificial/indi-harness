@@ -805,3 +805,123 @@ def test_the_reply_path_honours_an_unsubscribe_without_asking_a_model():
     # And the message is recorded as handled, so it is not reconsidered.
     queue = store.rows(sheets_queue.QUEUE_TAB)
     assert len(queue) == 1 and queue[0]["status"] == sheets_queue.STATUS_SKIPPED
+
+
+# --------------------------------------------------------------------------
+# RESEARCH: WEB SEARCH AND FETCH IN THE ISSUE RUN
+# --------------------------------------------------------------------------
+
+class _BetaClaude(FakeClaude):
+    """Records calls made through client.beta.messages too."""
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.beta = type("Beta", (), {"messages": self})()
+
+
+def _research_cfg(**over):
+    base = dict(enable_web_search=True, newsletter_web_search=True,
+                newsletter_max_searches=5, newsletter_web_fetch=False,
+                newsletter_max_fetches=3, web_fetch_allowed_domains=(),
+                web_search_tool_type="web_search_20250305",
+                web_fetch_tool_type="web_fetch_20250910")
+    base.update(over)
+    cfg = _cfg(**base)
+    cfg.betas = lambda want_web_fetch, want_code_execution, want_files: (
+        ["web-fetch-2025-09-10"] if want_web_fetch else [])
+    return cfg
+
+
+def _issue(client, cfg):
+    store = FakeStore()
+    return newsletter.run_issue(client, cfg, FakeGmail(), store, "SYS", "m",
+                                context="CTX")
+
+
+def test_issue_run_offers_search_with_its_own_cap():
+    client = _BetaClaude(newsletter.NEWSLETTER_TOOL,
+                         {"subject": "s", "body": "b"})
+    _issue(client, _research_cfg())
+    tools = client.calls[-1]["tools"]
+    search = [t for t in tools if t["name"] == "web_search"]
+    assert len(search) == 1 and search[0]["max_uses"] == 5
+    assert "web_fetch" not in client.offered_tools
+    system = client.calls[-1]["system"]
+    assert "Sources:" in system and "Never put anything from your correspondence" in system
+    assert "betas" not in client.calls[-1]
+
+
+def test_no_search_when_either_switch_is_off():
+    for over in ({"newsletter_web_search": False}, {"enable_web_search": False},
+                 {"newsletter_max_searches": 0}):
+        client = _BetaClaude(newsletter.NEWSLETTER_TOOL,
+                             {"subject": "s", "body": "b"})
+        _issue(client, _research_cfg(**over))
+        assert client.offered_tools == [newsletter.NEWSLETTER_TOOL]
+        assert "RESEARCH FOR THIS ISSUE" not in client.calls[-1]["system"]
+
+
+def test_old_configs_without_the_settings_get_no_search():
+    client = FakeClaude(newsletter.NEWSLETTER_TOOL, {"subject": "s", "body": "b"})
+    _issue(client, _cfg())
+    assert client.offered_tools == [newsletter.NEWSLETTER_TOOL]
+
+
+def test_fetch_rides_on_search_and_sends_the_beta():
+    client = _BetaClaude(newsletter.NEWSLETTER_TOOL,
+                         {"subject": "s", "body": "b"})
+    _issue(client, _research_cfg(newsletter_web_fetch=True,
+                                 web_fetch_allowed_domains=("example.org",)))
+    fetch = [t for t in client.calls[-1]["tools"] if t["name"] == "web_fetch"]
+    assert fetch and fetch[0]["max_uses"] == 3
+    assert fetch[0]["allowed_domains"] == ["example.org"]
+    assert client.calls[-1]["betas"] == ["web-fetch-2025-09-10"]
+
+    # Fetch alone, with search off, offers nothing.
+    client = _BetaClaude(newsletter.NEWSLETTER_TOOL,
+                         {"subject": "s", "body": "b"})
+    _issue(client, _research_cfg(newsletter_web_search=False,
+                                 newsletter_web_fetch=True))
+    assert client.offered_tools == [newsletter.NEWSLETTER_TOOL]
+
+
+def test_a_paused_turn_is_resumed_and_searches_are_costed(monkeypatch):
+    recorded = []
+    monkeypatch.setattr(newsletter.costs, "record",
+                        lambda kind, model, tokens, web_searches=0, note="":
+                        recorded.append(web_searches))
+    search_block = type("B", (), {"type": "server_tool_use", "name": "web_search",
+                                  "input": {"query": "q"}})()
+    send_block = type("B", (), {"type": "tool_use", "name": newsletter.NEWSLETTER_TOOL,
+                                "input": {"subject": "s", "body": "b"}})()
+    responses = [
+        type("R", (), {"content": [search_block], "usage": None,
+                       "stop_reason": "pause_turn"})(),
+        type("R", (), {"content": [search_block, send_block], "usage": None,
+                       "stop_reason": "tool_use"})(),
+    ]
+    client = _BetaClaude()
+
+    def stream(**kwargs):
+        client.calls.append(kwargs)
+        response = responses[len(client.calls) - 1]
+
+        class _S:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *e):
+                return False
+
+            def get_final_message(self):
+                return response
+        return _S()
+    client.stream = stream
+    gmail = FakeGmail()
+    outcome = newsletter.run_issue(client, _research_cfg(), gmail, FakeStore(),
+                                   "SYS", "m", context="CTX")
+    assert len(client.calls) == 2
+    # The resumed call carries the paused turn.
+    assert client.calls[1]["messages"][-1]["role"] == "assistant"
+    assert recorded == [1, 1]
+    assert " sent to " in outcome and gmail.sent

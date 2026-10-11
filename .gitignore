@@ -35,3 +35,6 @@ data/virtual_clock.json
 # Operator decisions on newcomers (approvals.py).
 data/approvals.json
 data/approvals.tmp
+
+# Which commit last failed to push, so the alert fires once (git_sync.py).
+data/git_sync.json

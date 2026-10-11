@@ -79,6 +79,7 @@ PROTECTED_FILES = {
     "clock.py",          # the time Indi believes it is (staging only)
     "staging.py",        # a staging copy sends only to test accounts
     "approvals.py",      # the operator approves newcomers before any terms go out
+    "git_sync.py",       # what reaches GitHub, and that it is never forced
 }
 
 # data/ holds the Terms of Service themselves and the record of who has

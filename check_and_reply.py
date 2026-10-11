@@ -81,6 +81,7 @@ import gmail_io
 import gmail_reads
 import drive_tables
 import alerts
+import git_sync
 import approvals
 import staging
 import clock
@@ -1476,6 +1477,10 @@ def main() -> int:
         crashed = sys.exc_info()[1]
         if isinstance(crashed, SystemExit):
             crashed = None if crashed.code in (0, None) else crashed
+        # Before the alert, so a push that fails is in this run's count.
+        if not cfg.dry_run and not getattr(args, "message_id", None):
+            outcome = git_sync.push_if_ahead(cfg)
+            log.debug("GitHub: %s", outcome)
         if not cfg.dry_run and not getattr(args, "message_id", None):
             try:
                 alerts.after_run(run_mode, monitor, run_failures, crashed)

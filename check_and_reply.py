@@ -82,6 +82,7 @@ import gmail_reads
 import drive_tables
 import alerts
 import git_sync
+import standing_notes
 import approvals
 import staging
 import clock
@@ -295,7 +296,8 @@ def load_system_prompt(cfg: Config, self_address: str) -> str:
         "more. Don't sign off with your name: your signature is added "
         "automatically."
     )
-    return base + runtime + "\n" + audience.PROMPT
+    # Lessons the operator approved for every conversation (standing_notes.py).
+    return base + runtime + "\n" + audience.PROMPT + standing_notes.prompt_section()
 
 
 # ---------------------------------------------------------------------------
@@ -429,6 +431,29 @@ SHARED_MAX_CHARS = 6000
 
 
 SHARED_ATTACHMENT_CHARS = 3000
+
+
+# How many people on a reply have their "Shareable" notes looked up. Each is
+# a Drive lookup; a reply to a crowd gets the first few.
+SHAREABLE_MAX_PEOPLE = 6
+
+
+def shareable_for(drive, recipients, selves) -> str:
+    """Each recipient's "Shareable" memory section, for a reply to several
+    people — the only part of a memory file that may be shown with others
+    present (memory_file.shareable_section)."""
+    own = {s.lower() for s in (selves or ())}
+    parts = []
+    for addr in sorted(a for a in recipients if a and a.lower() not in own)[:SHAREABLE_MAX_PEOPLE]:
+        try:
+            section = memory_file.shareable_section(
+                memory_file.SenderMemory(drive, addr).body)
+        except Exception:
+            log.debug("No shareable notes for %s.", addr, exc_info=True)
+            continue
+        if section:
+            parts.append(f"{addr}:\n{section}")
+    return "\n\n".join(parts)
 
 
 def shared_context(store, recipients, thread_id: str, cfg=None) -> str:
@@ -606,6 +631,20 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
     if newcomer:
         outcome = approvals.handle(cfg, gmail, people, msg, newcomer)
         log.info("Approval: %s", outcome)
+        if cfg.dry_run:
+            return outcome
+        if existing:
+            store.set_status(existing, sheets_queue.STATUS_SKIPPED, outcome)
+        else:
+            store.append_queue_row(msg, sheets_queue.STATUS_SKIPPED, outcome)
+        mark_as_read(gmail, msg["gmail_msg_id"])
+        return outcome
+
+    # --- the operator deciding on a proposed standing note ---------------
+    proposal = standing_notes.match(msg)
+    if proposal:
+        outcome = standing_notes.handle_answer(cfg, gmail, msg, proposal)
+        log.info("Standing note: %s", outcome)
         if cfg.dry_run:
             return outcome
         if existing:
@@ -953,6 +992,8 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
             # A person's memory file and unfolded exchanges are theirs;
             # with anyone else on the reply they stay out of view.
             memory_body="" if others else memory.body,
+            shareable_text=shareable_for(drive, recipients, selves) if others else "",
+            notes_operator=terms_gate.is_operator(sender) and authentic,
             pending_text="" if others else pending,
             recipients=recipients,
             addressed=_addressed(raw_message, selves),
@@ -1221,6 +1262,13 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
     except Exception:
         log.warning("Could not consolidate memory for %s.", sender,
                     exc_info=True)
+
+    # Any standing note this reply proposed goes to the operator now, after
+    # the reply itself is out (standing_notes.py).
+    try:
+        standing_notes.send_proposals(cfg, gmail)
+    except Exception:
+        log.warning("Could not send standing-note proposals.", exc_info=True)
 
     # The ledger's turn: account for what was open, record what's new;
     # settled entries cancel follow-ups about them, dated commitments get

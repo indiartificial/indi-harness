@@ -65,6 +65,7 @@ import os
 import re
 
 import agenda
+import standing_notes
 import attachments
 import costs
 import followups
@@ -472,7 +473,8 @@ def build_tools(cfg, trusted: bool, have_store: bool,
                 local_runner=None, scope_all_history: bool = False,
                 self_code_runner=None, claude_code_runner=None,
                 reminder_sender: str = "", shared_reply: bool = False,
-                agenda_owner: str = "") -> tuple[list[dict], list[str]]:
+                agenda_owner: str = "",
+                notes_operator: bool = False) -> tuple[list[dict], list[str]]:
     """Returns (tools, betas). Trust gates the dangerous ones."""
     tools: list[dict] = []
     want_fetch = False
@@ -559,6 +561,15 @@ def build_tools(cfg, trusted: bool, have_store: bool,
     # owner's and not the thread's.
     if have_store and agenda_owner and not shared_reply:
         tools.extend(agenda.schemas(agenda_owner))
+
+    # Standing notes (standing_notes.py). The operator, authenticated and
+    # alone on the reply, edits the list; everyone else's replies can only
+    # propose, and a proposal waits on the operator's APPROVE.
+    if notes_operator:
+        if not shared_reply:
+            tools.extend(standing_notes.schemas(operator=True))
+    else:
+        tools.extend(standing_notes.schemas(operator=False))
 
     # The spend ledger. Read-only, and restricted to trusted senders: what
     # the account costs is Steve's business, not a stranger's, and the
@@ -898,7 +909,8 @@ def generate_reply(client, cfg, system_prompt: str, msg: dict,
                    thread_text: str = "", quoted_text: str = "",
                    recipients=None, addressed: str = "",
                    agenda_owner: str = "", ledger_text: str = "",
-                   shared_text: str = "") -> tuple[str, dict]:
+                   shared_text: str = "", shareable_text: str = "",
+                   notes_operator: bool = False) -> tuple[str, dict]:
     """Returns (reply_text, stats). stats["set_aside"] is set to the stated
     reason if Indi chose not to reply at all."""
     sender_only = frozenset({(msg.get("from_addr") or "").lower()} - {""})
@@ -909,7 +921,8 @@ def generate_reply(client, cfg, system_prompt: str, msg: dict,
                                claude_code_runner,
                                reminder_sender=msg["from_addr"],
                                shared_reply=shared,
-                               agenda_owner=agenda_owner)
+                               agenda_owner=agenda_owner,
+                               notes_operator=notes_operator)
 
     system_blocks = [{
         "type": "text",
@@ -945,6 +958,16 @@ def generate_reply(client, cfg, system_prompt: str, msg: dict,
             "type": "text",
             "text": ("[Background memory about this specific correspondent, "
                      f"{msg['from_addr']}, from previous exchanges:]\n{memory_body}"),
+        })
+    if shareable_text.strip():
+        # On a reply to several people the memory files stay out; what is
+        # left is each person's "Shareable" section — how to address them,
+        # never what they wrote (memory_file.shareable_section).
+        user_blocks.append({
+            "type": "text",
+            "text": ("[From your notes, how to deal with the people on this "
+                     "reply: names, language, time zone, reply preferences. "
+                     "Nothing here is private to any of them:]\n" + shareable_text),
         })
     if pending_text.strip():
         user_blocks.append({
@@ -1146,6 +1169,16 @@ def generate_reply(client, cfg, system_prompt: str, msg: dict,
                 else:
                     text, is_error = self_service.handle(cfg, store, msg["from_addr"],
                                                          call.name, call.input)
+            elif call.name in standing_notes.TOOL_NAMES:
+                # Operator status comes from the caller's check, never the
+                # tool input; operator tools are refused on a shared reply.
+                operator = notes_operator and not shared
+                if notes_operator and shared:
+                    text, is_error = "Not available in a reply to several people.", True
+                else:
+                    text, is_error = standing_notes.handle(
+                        cfg, call.name, call.input, operator=operator,
+                        proposer=msg.get("from_addr", ""))
             elif call.name in agenda.TOOL_NAMES:
                 # Checked again here rather than trusted from the tool list:
                 # a tool the model names without having been offered it is

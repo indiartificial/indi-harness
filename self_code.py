@@ -80,6 +80,7 @@ PROTECTED_FILES = {
     "staging.py",        # a staging copy sends only to test accounts
     "approvals.py",      # the operator approves newcomers before any terms go out
     "git_sync.py",       # what reaches GitHub, and that it is never forced
+    "standing_notes.py", # rules for every conversation need the operator's approval
 }
 
 # data/ holds the Terms of Service themselves and the record of who has

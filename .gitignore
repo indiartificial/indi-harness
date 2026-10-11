@@ -38,3 +38,7 @@ data/approvals.tmp
 
 # Which commit last failed to push, so the alert fires once (git_sync.py).
 data/git_sync.json
+
+# Standing notes and proposals (standing_notes.py).
+data/standing_notes.json
+data/standing_notes.tmp

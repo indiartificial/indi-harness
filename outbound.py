@@ -1208,6 +1208,17 @@ def _context(cfg, store) -> str:
                      + sheets_queue.format_exchanges(recent, replies, max_chars_each=800))
 
     journal = store.recent_journal(limit=cfg.heartbeat_journal_entries)
+    # The long view (journal_digest.py): the latest weekly digest, unless it
+    # is already among the recent entries below.
+    try:
+        import journal_digest
+        digest = journal_digest.latest(store) if journal_digest.enabled() else None
+    except Exception:
+        log.debug("Could not read the journal digest.", exc_info=True)
+        digest = None
+    if digest and digest not in journal:
+        parts.append("=== YOUR LATEST WEEKLY DIGEST ===\n"
+                     f"[{digest.get('created_at', '')}]\n{digest.get('entry', '')}")
     if journal:
         parts.append("=== YOUR RECENT JOURNAL ENTRIES ===\n" + "\n\n".join(
             f"[{row.get('created_at', '')}]\n{row.get('entry', '')}" for row in journal
@@ -1388,6 +1399,16 @@ def run_heartbeat(client, cfg, gmail, store, system_prompt: str,
         # A broken newsletter must not cost the heartbeat its ordinary
         # run — the reply-adjacent work below is the part people notice.
         log.error("The newsletter check failed", exc_info=True)
+
+    # Fold older journal entries into a weekly digest when one is due
+    # (journal_digest.py). Before the budgets: it isn't initiative.
+    try:
+        import journal_digest
+        digested = journal_digest.maybe_write(client, cfg, store)
+        if digested.startswith("journal digest written"):
+            prefix += digested + "; "
+    except Exception:
+        log.warning("The journal digest failed.", exc_info=True)
 
     sent_today = store.outbound_today()
     journal_today = store.journal_today()

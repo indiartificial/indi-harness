@@ -81,6 +81,7 @@ PROTECTED_FILES = {
     "approvals.py",      # the operator approves newcomers before any terms go out
     "git_sync.py",       # what reaches GitHub, and that it is never forced
     "standing_notes.py", # rules for every conversation need the operator's approval
+    "memory_rights.py",  # a person seeing and deleting their notes, every copy
 }
 
 # data/ holds the Terms of Service themselves and the record of who has

@@ -83,6 +83,7 @@ import drive_tables
 import alerts
 import git_sync
 import standing_notes
+import memory_rights
 import approvals
 import staging
 import clock
@@ -714,6 +715,16 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
         log.info("Terms gate: %s", gate.outcome)
         if cfg.dry_run:
             return f"would stop at the terms gate ({gate.outcome})"
+        # Declining ends the correspondence, so the notes about them go too
+        # (memory_rights.py). The decline itself stays on record.
+        if gate.outcome.startswith("declined — acknowledged"):
+            try:
+                memory_rights.forget_everything(cfg, drive, store,
+                                                (msg.get("from_addr") or "").lower(),
+                                                why="declined the terms")
+            except Exception:
+                log.warning("Could not delete the notes of someone who declined.",
+                            exc_info=True)
         # `skipped` throughout, including where a fixed notice went out:
         # the status column is about whether the reply model produced a
         # reply, and the note says what the gate sent instead.
@@ -994,6 +1005,9 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
             memory_body="" if others else memory.body,
             shareable_text=shareable_for(drive, recipients, selves) if others else "",
             notes_operator=terms_gate.is_operator(sender) and authentic,
+            memory_rights_runner=(memory_rights.Runner(claude, cfg, drive, store, sender)
+                                  if memory_rights.eligible(msg, authentic, bool(others))
+                                  else None),
             pending_text="" if others else pending,
             recipients=recipients,
             addressed=_addressed(raw_message, selves),
@@ -1362,6 +1376,13 @@ def main() -> int:
 
         selves = self_addresses(gmail)
         system_prompt = load_system_prompt(cfg, ", ".join(selves) or "unknown")
+
+        # Memory deletions an earlier run couldn't finish (memory_rights.py).
+        if not cfg.dry_run:
+            try:
+                memory_rights.retry_purges(drive)
+            except Exception:
+                log.warning("Could not retry waiting memory deletions.", exc_info=True)
 
         if cfg.dry_run:
             log.info("DRY RUN — no mail sent, no sheets or memory written.")

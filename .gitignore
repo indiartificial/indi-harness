@@ -42,3 +42,7 @@ data/git_sync.json
 # Standing notes and proposals (standing_notes.py).
 data/standing_notes.json
 data/standing_notes.tmp
+
+# Memory deletions waiting to be retried (memory_rights.py).
+data/memory_purges.json
+data/memory_purges.tmp

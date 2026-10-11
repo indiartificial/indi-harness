@@ -85,6 +85,7 @@ import git_sync
 import standing_notes
 import memory_rights
 import address_links
+import calibration
 import approvals
 import staging
 import clock
@@ -299,7 +300,8 @@ def load_system_prompt(cfg: Config, self_address: str) -> str:
         "automatically."
     )
     # Lessons the operator approved for every conversation (standing_notes.py).
-    return base + runtime + "\n" + audience.PROMPT + standing_notes.prompt_section()
+    return (base + runtime + "\n" + audience.PROMPT + standing_notes.prompt_section()
+            + calibration.prompt_section())
 
 
 # ---------------------------------------------------------------------------

@@ -341,6 +341,13 @@ def forget_everything(cfg, drive, store, sender: str, why: str = "request") -> t
         except Exception:
             log.warning("Could not withdraw sharing permissions for %s.", sender,
                         exc_info=True)
+    # Claims Indi made to them alone keep their numbers, lose their words
+    # (calibration.py).
+    try:
+        import calibration
+        calibration.forget(sender)
+    except Exception:
+        log.warning("Could not erase claim text for %s.", sender, exc_info=True)
     log.info("Deleted all notes about %s (%s).", sender, why)
     done = "I've deleted all my notes about you, and every copy of them."
     if withdrawn:

@@ -66,6 +66,7 @@ import re
 
 import agenda
 import standing_notes
+import calibration
 import attachments
 import costs
 import followups
@@ -564,6 +565,11 @@ def build_tools(cfg, trusted: bool, have_store: bool,
     if have_store and agenda_owner and not shared_reply:
         tools.extend(agenda.schemas(agenda_owner))
 
+    # The claim record (calibration.py): every reply can record a claim and
+    # settle one made to the same people; the operator alone can list them
+    # and settle any.
+    tools.extend(calibration.schemas(operator=notes_operator and not shared_reply))
+
     # Standing notes (standing_notes.py). The operator, authenticated and
     # alone on the reply, edits the list; everyone else's replies can only
     # propose, and a proposal waits on the operator's APPROVE.
@@ -957,6 +963,15 @@ def generate_reply(client, cfg, system_prompt: str, msg: dict,
             "[Other recent mail that everyone this reply goes to has already "
             "seen. It is theirs to discuss: use it, and answer questions about it.]\n"
             + shared_text)})
+    # Claims made to these same people that are still open (calibration.py).
+    if calibration.enabled():
+        try:
+            open_claims = calibration.render_open(calibration.open_for(recipients))
+        except Exception:
+            log.debug("Could not read open claims.", exc_info=True)
+            open_claims = ""
+        if open_claims:
+            user_blocks.append({"type": "text", "text": open_claims})
     if ledger_text.strip():
         # What is still open on this thread (ledger.py): questions waiting
         # on an answer, things Indi said it would do.
@@ -1074,6 +1089,7 @@ def generate_reply(client, cfg, system_prompt: str, msg: dict,
              # can tell a fact Indi looked up from one it had no business with.
              "tool_outputs": []}
     response = None
+    claim_counter: dict = {}
     # Empty means "search everything"; otherwise the search is pinned to
     # this sender's own messages, enforced here rather than in the prompt.
     restrict_to = "" if scope_all_history else msg["from_addr"]
@@ -1193,6 +1209,10 @@ def generate_reply(client, cfg, system_prompt: str, msg: dict,
                 else:
                     text, is_error = self_service.handle(cfg, store, msg["from_addr"],
                                                          call.name, call.input)
+            elif call.name in calibration.TOOL_NAMES:
+                text, is_error = calibration.handle(
+                    cfg, call.name, call.input, recipients,
+                    operator=notes_operator and not shared, counter=claim_counter)
             elif call.name in standing_notes.TOOL_NAMES:
                 # Operator status comes from the caller's check, never the
                 # tool input; operator tools are refused on a shared reply.

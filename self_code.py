@@ -83,6 +83,7 @@ PROTECTED_FILES = {
     "standing_notes.py", # rules for every conversation need the operator's approval
     "memory_rights.py",  # a person seeing and deleting their notes, every copy
     "address_links.py",  # which addresses count as one person
+    "calibration.py",    # how Indi's claims are checked; not graded by the graded
 }
 
 # data/ holds the Terms of Service themselves and the record of who has

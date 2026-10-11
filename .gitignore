@@ -50,3 +50,7 @@ data/memory_purges.tmp
 # Linked addresses and pending link codes (address_links.py).
 data/address_links.json
 data/address_links.tmp
+
+# Indi's recorded claims and how they turned out (calibration.py).
+data/calibration.json
+data/calibration.tmp

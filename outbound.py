@@ -1216,6 +1216,15 @@ def _context(cfg, store) -> str:
     except Exception:
         log.debug("Could not read the journal digest.", exc_info=True)
         digest = None
+    # The claim record (calibration.py): numbers, and how many are waiting.
+    try:
+        import calibration
+        record = calibration.heartbeat_section()
+    except Exception:
+        log.debug("Could not read the claim record.", exc_info=True)
+        record = ""
+    if record:
+        parts.append(record)
     if digest and digest not in journal:
         parts.append("=== YOUR LATEST WEEKLY DIGEST ===\n"
                      f"[{digest.get('created_at', '')}]\n{digest.get('entry', '')}")
@@ -1409,6 +1418,17 @@ def run_heartbeat(client, cfg, gmail, store, system_prompt: str,
             prefix += digested + "; "
     except Exception:
         log.warning("The journal digest failed.", exc_info=True)
+
+    # Settle claims that have come due (calibration.py), once a day. Not
+    # initiative, so before the budgets; it sends nothing.
+    try:
+        import calibration
+        if calibration.enabled() and calibration.due():
+            reviewed = calibration.review(client, cfg, store, context=_context(cfg, store))
+            if reviewed.startswith("claims reviewed"):
+                prefix += reviewed + "; "
+    except Exception:
+        log.warning("The claim review failed.", exc_info=True)
 
     sent_today = store.outbound_today()
     journal_today = store.journal_today()

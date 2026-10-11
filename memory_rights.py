@@ -174,12 +174,14 @@ def show(drive, store, sender: str) -> str:
 # FORGETTING
 # ---------------------------------------------------------------------------
 
-def _all_copies(drive, sender: str) -> list[dict]:
+def _all_copies(drive, sender: str, resolve: bool = True) -> list[dict]:
     """Every Drive file holding this person's notes, trashed or not: the
-    memory file, timestamped backups, and the legacy "(previous)" copy."""
-    exact = {memory_file.memory_file_name(sender), memory_file.backup_file_name(sender)}
-    prefix = memory_file.backup_name_prefix(sender)
-    stem = memory_file.memory_file_name(sender)
+    memory file, timestamped backups, and the legacy "(previous)" copy.
+    `resolve=False` means this address's own files, ignoring any link."""
+    exact = {memory_file.memory_file_name(sender, resolve),
+             memory_file.backup_file_name(sender, resolve)}
+    prefix = memory_file.backup_name_prefix(sender, resolve)
+    stem = memory_file.memory_file_name(sender, resolve)
     found = (drive.files().list(
         q=f"name contains '{memory_file._escape(stem)}'",
         spaces="drive", fields="files(id, name)").execute().get("files", []))
@@ -187,11 +189,11 @@ def _all_copies(drive, sender: str) -> list[dict]:
             if f.get("name") in exact or f.get("name", "").startswith(prefix)]
 
 
-def _delete_copies(drive, sender: str, keep_id: str = "") -> list[str]:
+def _delete_copies(drive, sender: str, keep_id: str = "", resolve: bool = True) -> list[str]:
     """Permanently delete every copy except `keep_id`. Returns the ids that
     could not be deleted."""
     failed = []
-    for f in _all_copies(drive, sender):
+    for f in _all_copies(drive, sender, resolve):
         if f["id"] == keep_id:
             continue
         try:
@@ -209,7 +211,10 @@ def _remember_purge(sender: str, keep_id: str, path: Path | None = None) -> None
         data = json.loads(path.read_text()) if path.exists() else {}
     except Exception:
         data = {}
-    data[sender] = {"keep_id": keep_id}
+    # Stored as the file owner at this moment, and retried without
+    # following links: a link made later must not point the retry at
+    # somebody's newer notes.
+    data[memory_file._person(sender)] = {"keep_id": keep_id}
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, indent=2))
@@ -228,7 +233,7 @@ def retry_purges(drive, path: Path | None = None) -> int:
         return 0
     finished = 0
     for sender in list(data):
-        if not _delete_copies(drive, sender, data[sender].get("keep_id", "")):
+        if not _delete_copies(drive, sender, data[sender].get("keep_id", ""), resolve=False):
             del data[sender]
             finished += 1
     if data:

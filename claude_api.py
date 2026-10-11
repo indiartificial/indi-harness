@@ -475,7 +475,8 @@ def build_tools(cfg, trusted: bool, have_store: bool,
                 reminder_sender: str = "", shared_reply: bool = False,
                 agenda_owner: str = "",
                 notes_operator: bool = False,
-                memory_rights_runner=None) -> tuple[list[dict], list[str]]:
+                memory_rights_runner=None,
+                address_links_runner=None) -> tuple[list[dict], list[str]]:
     """Returns (tools, betas). Trust gates the dangerous ones."""
     tools: list[dict] = []
     want_fetch = False
@@ -593,6 +594,10 @@ def build_tools(cfg, trusted: bool, have_store: bool,
     # alone on the reply, and replied to at their From address.
     if memory_rights_runner is not None and not shared_reply:
         tools.extend(memory_rights_runner.schemas())
+    # Linking another address of the sender's (address_links.py): offered
+    # on exactly the same conditions.
+    if address_links_runner is not None and not shared_reply:
+        tools.extend(address_links_runner.schemas())
 
     if self_code_runner is not None:
         tools.extend(self_code_runner.schemas())
@@ -918,7 +923,8 @@ def generate_reply(client, cfg, system_prompt: str, msg: dict,
                    agenda_owner: str = "", ledger_text: str = "",
                    shared_text: str = "", shareable_text: str = "",
                    notes_operator: bool = False,
-                   memory_rights_runner=None) -> tuple[str, dict]:
+                   memory_rights_runner=None,
+                   address_links_runner=None) -> tuple[str, dict]:
     """Returns (reply_text, stats). stats["set_aside"] is set to the stated
     reason if Indi chose not to reply at all."""
     sender_only = frozenset({(msg.get("from_addr") or "").lower()} - {""})
@@ -931,7 +937,8 @@ def generate_reply(client, cfg, system_prompt: str, msg: dict,
                                shared_reply=shared,
                                agenda_owner=agenda_owner,
                                notes_operator=notes_operator,
-                               memory_rights_runner=memory_rights_runner)
+                               memory_rights_runner=memory_rights_runner,
+                               address_links_runner=address_links_runner)
 
     system_blocks = [{
         "type": "text",
@@ -1219,6 +1226,12 @@ def generate_reply(client, cfg, system_prompt: str, msg: dict,
                 # every other tool that can surface content from disk.
                 if not is_error:
                     text = f"{UNTRUSTED_OPEN}\n{text}\n{UNTRUSTED_CLOSE}"
+            elif (address_links_runner is not None
+                  and call.name in address_links_runner.tool_names):
+                if shared:
+                    text, is_error = "Not available in a reply to several people.", True
+                else:
+                    text, is_error = address_links_runner.handle(call.name, call.input)
             elif (memory_rights_runner is not None
                   and call.name in memory_rights_runner.tool_names):
                 if shared:

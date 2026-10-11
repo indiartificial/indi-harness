@@ -180,18 +180,32 @@ def _slug(sender_addr: str) -> str:
     return re.sub(r"[^A-Za-z0-9._@\-]", "_", sender_addr.lower()) or "unknown"
 
 
-def memory_file_name(sender_addr: str) -> str:
-    return f"Indi Memory - {_slug(sender_addr)}"
+def _person(sender_addr: str, resolve: bool = True) -> str:
+    """The address a memory file is named for: the main address when this
+    one is linked to it (address_links.py), so a person with two addresses
+    has one memory. `resolve=False` names the address's own file."""
+    if not resolve:
+        return sender_addr
+    try:
+        import address_links
+        return address_links.canonical(sender_addr)
+    except Exception:  # pragma: no cover - a broken link file must not stop replies
+        log.debug("Could not resolve linked addresses.", exc_info=True)
+        return sender_addr
 
 
-def backup_file_name(sender_addr: str) -> str:
+def memory_file_name(sender_addr: str, resolve: bool = True) -> str:
+    return f"Indi Memory - {_slug(_person(sender_addr, resolve))}"
+
+
+def backup_file_name(sender_addr: str, resolve: bool = True) -> str:
     """The legacy single-slot backup name. Still read/recognised so an
     existing deployment's one existing backup isn't orphaned."""
-    return f"Indi Memory - {_slug(sender_addr)} (previous)"
+    return f"Indi Memory - {_slug(_person(sender_addr, resolve))} (previous)"
 
 
-def backup_name_prefix(sender_addr: str) -> str:
-    return f"Indi Memory - {_slug(sender_addr)} (backup "
+def backup_name_prefix(sender_addr: str, resolve: bool = True) -> str:
+    return f"Indi Memory - {_slug(_person(sender_addr, resolve))} (backup "
 
 
 def timestamped_backup_name(sender_addr: str, when=None) -> str:

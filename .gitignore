@@ -46,3 +46,7 @@ data/standing_notes.tmp
 # Memory deletions waiting to be retried (memory_rights.py).
 data/memory_purges.json
 data/memory_purges.tmp
+
+# Linked addresses and pending link codes (address_links.py).
+data/address_links.json
+data/address_links.tmp

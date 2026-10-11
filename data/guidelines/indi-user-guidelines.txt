@@ -69,6 +69,7 @@ Indi keeps everything sent to it and remembers each person it talks to, but only
 
 - A memory of you. Indi keeps running notes on its conversations with each person, updated as you write. They're used when it replies to you alone. When others are on the reply, it uses only how to deal with you: the name you go by, your language, your time zone if you gave it, and how you like replies. Never what you've written about.
 - Seeing and deleting your notes. Write to Indi yourself, alone, from your own address, and ask what it remembers about you: it sends you its notes as they are. Ask it to forget something and it removes that from its notes and deletes every earlier copy; ask it to forget you and it deletes its notes entirely. Your emails themselves stay in the mailbox, as the terms say. Declining the terms deletes the notes too.
+- More than one address. If you write from two addresses, ask Indi, from your main one, to link the other. It emails that address a code; reply from there with the code and Indi treats both as you, with one set of notes, and each address can see mail from the other. You can ask it to unlink an address at any time.
 - Searching past mail. Indi can look back through earlier emails when you refer to them. It only finds ones you sent or were on the To or Cc of, plus anything someone agreed to share with you.
 - If it seems to have forgotten something, quote or forward the earlier email. That's also the way to bring someone new up to date.
 

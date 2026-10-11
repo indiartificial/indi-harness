@@ -84,6 +84,7 @@ import alerts
 import git_sync
 import standing_notes
 import memory_rights
+import address_links
 import approvals
 import staging
 import clock
@@ -641,6 +642,22 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
         mark_as_read(gmail, msg["gmail_msg_id"])
         return outcome
 
+    # --- a code coming back to link a second address (address_links.py) -
+    # Before the terms gate: the address confirming may not have accepted
+    # the terms yet, and the code is all this thread is for.
+    link = address_links.match(msg)
+    if link:
+        outcome = address_links.confirm(cfg, gmail, drive, store, people, msg, link)
+        log.info("Address link: %s", outcome)
+        if cfg.dry_run:
+            return outcome
+        if existing:
+            store.set_status(existing, sheets_queue.STATUS_SKIPPED, outcome)
+        else:
+            store.append_queue_row(msg, sheets_queue.STATUS_SKIPPED, outcome)
+        mark_as_read(gmail, msg["gmail_msg_id"])
+        return outcome
+
     # --- the operator deciding on a proposed standing note ---------------
     proposal = standing_notes.match(msg)
     if proposal:
@@ -682,7 +699,10 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
     # gets a short note saying so. An autoresponder, a list or a no-reply
     # address never does: that is how mail loops start.
     withheld = None
-    if should_reply and not cfg.is_allowed(sender):
+    # A linked address is allowed when its main address is (address_links.py);
+    # trust and other privileges are not carried over.
+    if should_reply and not (cfg.is_allowed(sender)
+                             or cfg.is_allowed(address_links.canonical(sender))):
         should_reply, reason = False, "sender not in INDI_ALLOWED_SENDERS"
         withheld = NOTICE_UNABLE
     if should_reply and cfg.max_replies_per_sender_per_day:
@@ -1006,6 +1026,10 @@ def process_message(gmail, drive, claude, cfg: Config, store: sheets_queue.Sheet
             shareable_text=shareable_for(drive, recipients, selves) if others else "",
             notes_operator=terms_gate.is_operator(sender) and authentic,
             memory_rights_runner=(memory_rights.Runner(claude, cfg, drive, store, sender)
+                                  if memory_rights.eligible(msg, authentic, bool(others))
+                                  else None),
+            address_links_runner=(address_links.Runner(cfg, gmail, store, people, sender,
+                                                       selves)
                                   if memory_rights.eligible(msg, authentic, bool(others))
                                   else None),
             pending_text="" if others else pending,

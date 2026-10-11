@@ -82,6 +82,7 @@ PROTECTED_FILES = {
     "git_sync.py",       # what reaches GitHub, and that it is never forced
     "standing_notes.py", # rules for every conversation need the operator's approval
     "memory_rights.py",  # a person seeing and deleting their notes, every copy
+    "address_links.py",  # which addresses count as one person
 }
 
 # data/ holds the Terms of Service themselves and the record of who has
